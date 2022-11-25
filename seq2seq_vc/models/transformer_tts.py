@@ -1,6 +1,7 @@
 import torch
+import torch.nn.functional as F
 
-from seq2seq_vc.layers.positional_encoding import ScaledPositionalEncoding
+from seq2seq_vc.layers.positional_encoding import PositionalEncoding, ScaledPositionalEncoding
 from seq2seq_vc.modules.transformer.encoder import Encoder
 from seq2seq_vc.modules.transformer.decoder import Decoder
 from seq2seq_vc.modules.pre_postnets import Prenet, Postnet
@@ -8,7 +9,7 @@ from seq2seq_vc.modules.transformer.mask import subsequent_mask, target_mask
 from seq2seq_vc.layers.utils import make_non_pad_mask
 from seq2seq_vc.modules.transformer.attention import MultiHeadedAttention
 
-class VTN(torch.nn.Module):
+class TransformerTTS(torch.nn.Module):
     
     def __init__(
         self,
@@ -43,23 +44,28 @@ class VTN(torch.nn.Module):
         # store hyperparameters
         self.idim = idim
         self.odim = odim
+        self.eos = idim - 1
         self.spk_embed_dim = spk_embed_dim
         if self.spk_embed_dim is not None:
             self.spk_embed_integration_type = spk_embed_integration_type
         self.decoder_reduction_factor = decoder_reduction_factor
 
         # use idx 0 as padding idx
-        padding_idx = 0
+        self.padding_idx = 0
 
         # define encoder
+        encoder_input_layer = torch.nn.Embedding(
+            num_embeddings=idim, embedding_dim=adim, padding_idx=self.padding_idx
+        )
         self.encoder = Encoder(
             idim=idim,
             attention_dim=adim,
             attention_heads=aheads,
             linear_units=eunits,
             num_blocks=elayers,
-            input_layer="conv2d-scaled-pos-enc",
+            input_layer=encoder_input_layer,
             pos_enc_class=ScaledPositionalEncoding,
+            # pos_enc_class=PositionalEncoding,
             normalize_before=encoder_normalize_before,
             concat_after=encoder_concat_after,
         )
@@ -124,6 +130,12 @@ class VTN(torch.nn.Module):
         if max_olen != ys.shape[1]:
             ys = ys[:, :max_olen]
             labels = labels[:, :max_olen]
+
+        # Add eos at the last of sequence
+        xs = F.pad(xs, [0, 1], "constant", self.padding_idx)
+        for i, l in enumerate(ilens):
+            xs[i, l] = self.eos
+        ilens = ilens + 1
 
         # forward encoder
         x_masks = self._source_mask(ilens).to(xs.device)
@@ -197,6 +209,9 @@ class VTN(torch.nn.Module):
         threshold = inference_args["threshold"]
         minlenratio = inference_args["minlenratio"]
         maxlenratio = inference_args["maxlenratio"]
+
+        # add eos at the last of sequence
+        x = F.pad(x, [0, 1], "constant", self.eos)
 
         # forward encoder
         x = x.unsqueeze(0)

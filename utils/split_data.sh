@@ -44,6 +44,13 @@ else
     num_src_utts=$(wc -l < "${src_scp}")
 fi
 
+if [ -e "${src_dir}/text" ]; then
+    has_text=true
+    src_text=${src_dir}/text
+else
+    has_text=false
+fi
+
 # check number of utts
 if [ "${num_first}" -eq 0 ] && [ "${num_second}" -eq 0 ]; then
     num_first=$((num_src_utts / 2 ))
@@ -79,6 +86,17 @@ if ! "${has_segments}"; then
         head -n "${num_first}" "${src_scp}" | sort > "${first_dist_dir}/wav.scp"
         tail -n "${num_second}" "${src_scp}" | sort > "${second_dist_dir}/wav.scp"
     fi
+    # split text
+    if "${has_text}"; then
+        rm -rf "${first_dist_dir}/text"
+        awk '{print $1}' < "${first_dist_dir}/wav.scp" | sort | uniq | while read -r wav_id; do
+            grep "^${wav_id} " < "${src_text}" >> "${first_dist_dir}/text"
+        done
+        rm -rf "${second_dist_dir}/text"
+        awk '{print $1}' < "${second_dist_dir}/wav.scp" | sort | uniq | while read -r wav_id; do
+            grep "^${wav_id} " < "${src_text}" >> "${second_dist_dir}/text"
+        done
+    fi
 else
     # split segments at first
     if "${shuffle}"; then
@@ -99,6 +117,17 @@ else
     awk '{print $2}' < "${second_dist_dir}/segments" | sort | uniq | while read -r wav_id; do
         grep "^${wav_id} " < "${src_scp}" >> "${second_dist_dir}/wav.scp"
     done
+    # split text
+    if "${has_text}"; then
+        rm -rf "${first_dist_dir}/text"
+        awk '{print $2}' < "${first_dist_dir}/segments" | sort | uniq | while read -r wav_id; do
+            grep "^${wav_id} " < "${src_text}" >> "${first_dist_dir}/text"
+        done
+        rm -rf "${second_dist_dir}/text"
+        awk '{print $2}' < "${second_dist_dir}/segments" | sort | uniq | while read -r wav_id; do
+            grep "^${wav_id} " < "${src_text}" >> "${second_dist_dir}/text"
+        done
+    fi
 fi
 
 echo "Successfully split data directory."

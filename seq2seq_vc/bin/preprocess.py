@@ -171,9 +171,14 @@ def main():
         assert (
             np.abs(audio).max() <= 1.0
         ), f"{utt_id} seems to be different from 16 bit PCM."
-        assert (
-            fs == config["sampling_rate"]
-        ), f"{utt_id} seems to have a different sampling rate."
+
+        # resample to specified sampling rate in config
+        if fs != config["sampling_rate"]:
+            audio = librosa.resample(
+                audio,
+                orig_sr=fs,
+                target_sr=config["sampling_rate"],
+            )
 
         # trim silence
         if config["trim_silence"]:

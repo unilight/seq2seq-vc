@@ -1,0 +1,90 @@
+###########################################################
+#                FEATURE EXTRACTION SETTING               #
+###########################################################
+sampling_rate: 16000     # Sampling rate.
+fft_size: 1024           # FFT size.
+hop_size: 256            # Hop size.
+win_length: null         # Window length.
+                         # If set to null, it will be the same as fft_size.
+window: "hann"           # Window function.
+num_mels: 80             # Number of mel basis.
+fmin: 80                 # Minimum freq in mel basis calculation.
+fmax: 7600               # Maximum frequency in mel basis calculation.
+global_gain_scale: 1.0   # Will be multiplied to all of waveform.
+trim_silence: false      # Whether to trim the start and end of silence.
+trim_threshold_in_db: 60 # Need to tune carefully if the recording is not good.
+trim_frame_size: 2048    # Frame size in trimming.
+trim_hop_size: 512       # Hop size in trimming.
+format: "hdf5"           # Feature file format. "npy" or "hdf5" is supported.
+
+###########################################################
+#              NETWORK ARCHITECTURE SETTING               #
+###########################################################
+model_type: TransformerTTS
+model_params:
+    odim: 80
+    dprenet_layers: 2  # one more linear layer w/o non-linear will be added for 0_centor
+    dprenet_units: 256
+    adim: 384
+    aheads: 4
+    elayers: 6
+    eunits: 1536
+    dlayers: 6
+    dunits: 1536
+    postnet_layers: 5
+    postnet_filts: 5
+    postnet_chans: 256
+    use_batch_norm: True
+    encoder_normalize_before: True
+    decoder_normalize_before: False
+    encoder_concat_after: False
+    decoder_concat_after: False
+    decoder_reduction_factor: 2
+
+###########################################################
+#                      LOSS SETTING                       #
+###########################################################
+seq2seq_loss_params:
+    bce_pos_weight: 10.0
+
+###########################################################
+#                   INFERENCE SETTING                     #
+###########################################################
+vocoder: Null
+inference:
+    threshold: 0.5    # threshold to stop the generation
+    maxlenratio: 10.0 # maximum length of generated samples = input length * maxlenratio
+    minlenratio: 0.0  # minimum length of generated samples = input length * minlenratio
+
+###########################################################
+#                  DATA LOADER SETTING                    #
+###########################################################
+batch_size: 128              # Batch size.
+pin_memory: true            # Whether to pin memory in Pytorch DataLoader.
+num_workers: 2              # Number of workers in Pytorch DataLoader.
+allow_cache: true           # Whether to allow cache in dataset. If true, it requires cpu memory.
+
+###########################################################
+#             OPTIMIZER & SCHEDULER SETTING               #
+###########################################################
+optimizer_type: Adam
+optimizer_params:
+    lr: 0.0008              # Learning rate := lr (default = 1.0) / model_size**0.5 / warmup_steps**0.5
+                            # See https://github.com/espnet/espnet/blob/master/espnet2/schedulers/noam_lr.py#L49-L50
+grad_norm: 1.0              # Gradient norm.
+scheduler: warmuplr
+scheduler_params:
+    warmup_steps: 4000      # Scheduler warm up step
+
+###########################################################
+#                    INTERVAL SETTING                     #
+###########################################################
+train_max_steps: 100000                 # Number of training steps.
+save_interval_steps: 1000               # Interval steps to save checkpoint.
+eval_interval_steps: 100               # Interval steps to evaluate the network.
+log_interval_steps: 10                 # Interval steps to record the training log.
+
+###########################################################
+#                     OTHER SETTING                       #
+###########################################################
+num_save_intermediate_results: 4  # Number of results to be saved as intermediate results.
