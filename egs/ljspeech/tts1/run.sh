@@ -46,6 +46,11 @@ nlsyms_txt=none  # Non-linguistic symbol list (needed if existing).
 cleaner=tacotron # Text cleaner.
 g2p=g2p_en       # g2p method (needed if token_type=phn).
 lang=noinfo      # The language type of corpus.
+
+# TTS autoencoder pretraining setting
+tts_aept_checkpoint=
+tts_aept_config=conf/tts_aept.v1.yaml
+tts_aept_exptag=
                                        
 # shellcheck disable=SC1091
 . utils/parse_options.sh || exit 1;
@@ -228,4 +233,46 @@ if [ ${stage} -le 5 ] && [ ${stop_stage} -ge 5 ]; then
                 --data_root "${db_root}/LJSpeech-1.1" \
                 --f0_path "conf/f0.yaml"
     done
+fi
+
+###########################################################
+#              TTS AUTOENCODER PRETRAINING                #
+###########################################################
+
+if [ "${stage}" -le 6 ] && [ "${stop_stage}" -ge 6 ]; then
+    echo "Stage 6: TTS autoencoder pretraining"
+    tts_aept_origin_expdir=$(basename "$(dirname ${tts_aept_checkpoint})")
+    tts_aept_checkpoint_name=$(basename ${tts_aept_checkpoint%.*})
+
+    tts_aept_expdir=exp/tts_aept_${tts_aept_origin_expdir}_${tts_aept_checkpoint_name}
+    if [ ! -z ${tts_aept_exptag} ]; then
+        tts_aept_expdir="${tts_aept_expdir}_${tts_aept_exptag}"
+    fi
+
+    [ ! -e "${tts_aept_expdir}" ] && mkdir -p "${tts_aept_expdir}"
+    cp "${tts_aept_checkpoint}" "${tts_aept_expdir}/original_${tts_aept_checkpoint_name}.pkl"
+    cp "exp/${tts_aept_origin_expdir}/stats.${stats_ext}" "${tts_aept_expdir}/"
+    cp "exp/${tts_aept_origin_expdir}/config.yml" "${tts_aept_expdir}/original_config.yaml"
+    if [ "${n_gpus}" -gt 1 ]; then
+        echo "Not Implemented yet."
+        exit 1
+        train="python -m seq2seq_vc.distributed.launch --nproc_per_node ${n_gpus} -c tts-train"
+    else
+        train="vc_train.py"
+    fi
+    echo "Training start. See the progress via ${tts_aept_expdir}/train.log."
+    ${cuda_cmd} --gpu "${n_gpus}" "${tts_aept_expdir}/train.log" \
+        ${train} \
+            --config "${tts_aept_expdir}/original_config.yaml" \
+            --additional-config "${tts_aept_config}" \
+            --src-train-dumpdir "${dumpdir}/${train_set}/norm" \
+            --src-dev-dumpdir "${dumpdir}/${dev_set}/norm" \
+            --trg-train-dumpdir "${dumpdir}/${train_set}/norm" \
+            --trg-dev-dumpdir "${dumpdir}/${dev_set}/norm" \
+            --trg-stats "${tts_aept_expdir}/stats.${stats_ext}" \
+            --init-checkpoint "${tts_aept_expdir}/original_${tts_aept_checkpoint_name}.pkl" \
+            --outdir "${tts_aept_expdir}" \
+            --resume "${resume}" \
+            --verbose "${verbose}"
+    echo "Successfully finished training."
 fi

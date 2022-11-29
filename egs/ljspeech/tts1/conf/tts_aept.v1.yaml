@@ -1,0 +1,49 @@
+
+###########################################################
+#                  FINE-TUNING SETTING                    #
+###########################################################
+init-mods: ["decoder", "feat_out", "prob_out", "postnet"]
+freeze-mods: ["decoder", "feat_out", "prob_out", "postnet"]
+
+###########################################################
+#              NETWORK ARCHITECTURE SETTING               #
+###########################################################
+model_type: VTN
+model_params:
+    idim: 80
+    odim: 80
+    dprenet_layers: 2  # one more linear layer w/o non-linear will be added for 0_centor
+    dprenet_units: 256
+    adim: 384
+    aheads: 4
+    elayers: 6
+    eunits: 1536
+    dlayers: 6
+    dunits: 1536
+    postnet_layers: 5
+    postnet_filts: 5
+    postnet_chans: 256
+    use_batch_norm: True
+    encoder_normalize_before: True
+    decoder_normalize_before: False
+    encoder_concat_after: False
+    decoder_concat_after: False
+    decoder_reduction_factor: 2
+
+###########################################################
+#                   INFERENCE SETTING                     #
+###########################################################
+inference:
+    threshold: 0.5    # threshold to stop the generation
+    maxlenratio: 2.0 # maximum length of generated samples = input length * maxlenratio
+    minlenratio: 0.0  # minimum length of generated samples = input length * minlenratio
+
+###########################################################
+#                  DATA LOADER SETTING                    #
+###########################################################
+batch_size: 100             # Batch size.
+
+###########################################################
+#                    INTERVAL SETTING                     #
+###########################################################
+train_max_steps: 50000                 # Number of training steps.

@@ -31,6 +31,7 @@ from seq2seq_vc.datasets import ParallelVCMelDataset
 from seq2seq_vc.losses import Seq2SeqLoss
 from seq2seq_vc.utils import read_hdf5
 from seq2seq_vc.vocoder import Vocoder
+from seq2seq_vc.utils.model_io import freeze_modules, filter_modules, get_partial_state_dict, transfer_verification, print_new_keys
 
 # set to avoid matplotlib error in CLI environment
 import matplotlib
@@ -145,6 +146,42 @@ class Trainer(object):
             self.epochs = state_dict["epochs"]
             self.optimizer.load_state_dict(state_dict["optimizer"])
             self.scheduler.load_state_dict(state_dict["scheduler"])
+
+    def load_trained_modules(self, checkpoint_path, init_mods):
+        if self.config["distributed"]:
+            main_state_dict = self.model.module.state_dict()
+        else:
+            main_state_dict = self.model.state_dict()
+
+        if os.path.isfile(checkpoint_path):
+            model_state_dict = torch.load(checkpoint_path, map_location="cpu")["model"]
+            
+            # first make sure that all modules in `init_mods` are in `checkpoint_path`
+            modules = filter_modules(model_state_dict, init_mods)
+
+            # then, actually get the partial state_dict
+            partial_state_dict = get_partial_state_dict(model_state_dict, modules)
+
+            if partial_state_dict:
+                if transfer_verification(
+                    main_state_dict, partial_state_dict, modules
+                ):
+                    print_new_keys(partial_state_dict, modules, checkpoint_path)
+                    main_state_dict.update(partial_state_dict)
+        else:
+            logging.error(f"Specified model was not found: {checkpoint_path}")
+            exit(1)
+
+        if self.config["distributed"]:
+            self.model.module.load_state_dict(main_state_dict)
+        else:
+            self.model.load_state_dict(main_state_dict)
+    
+    def freeze_modules(self, freeze_mods):
+        if self.config["distributed"]:
+            freeze_modules(self.model.module, freeze_mods)
+        else:
+            freeze_modules(self.model, freeze_mods)
 
     def _train_step(self, batch):
         """Train model one step."""
@@ -474,11 +511,17 @@ def main():
         help="yaml format configuration file.",
     )
     parser.add_argument(
-        "--pretrain",
+        "--additional-config",
+        type=str,
+        default=None,
+        help="yaml format configuration file (additional; for second-stage pretraining).",
+    )
+    parser.add_argument(
+        "--init-checkpoint",
         default="",
         type=str,
         nargs="?",
-        help='checkpoint file path to load pretrained params. (default="")',
+        help='checkpoint file path to initialize pretrained params. (default="")',
     )
     parser.add_argument(
         "--resume",
@@ -548,10 +591,18 @@ def main():
     if not os.path.exists(args.outdir):
         os.makedirs(args.outdir)
 
-    # load and save config
+    # load main config
     with open(args.config) as f:
         config = yaml.load(f, Loader=yaml.Loader)
     config.update(vars(args))
+
+    # load additional config
+    if args.additional_config is not None:
+        with open(args.additional_config) as f:
+            additional_config = yaml.load(f, Loader=yaml.Loader)
+        config.update(additional_config)
+
+    # save config
     config["version"] = seq2seq_vc.__version__  # add version info
     with open(os.path.join(args.outdir, "config.yml"), "w") as f:
         yaml.dump(config, f, Dumper=yaml.Dumper)
@@ -652,6 +703,8 @@ def main():
             config["trg_stats"],
             device
         )
+    else:
+        vocoder = None
 
     # define criterions
     criterion = Seq2SeqLoss(
@@ -707,14 +760,20 @@ def main():
     )
 
     # load pretrained parameters from checkpoint
-    if len(args.pretrain) != 0:
-        trainer.load_checkpoint(args.pretrain, load_only_params=True)
-        logging.info(f"Successfully load parameters from {args.pretrain}.")
+    if len(args.init_checkpoint) != 0:
+        trainer.load_trained_modules(args.init_checkpoint, init_mods=config["init-mods"])
+        logging.info(f"Successfully load parameters from {args.init_checkpoint}.")
 
     # resume from checkpoint
     if len(args.resume) != 0:
         trainer.load_checkpoint(args.resume)
         logging.info(f"Successfully resumed from {args.resume}.")
+
+    # freeze modules if necessary
+    if config.get("freeze-mods", None) is not None:
+        assert type(config["freeze-mods"]) is list
+        trainer.freeze_modules(config["freeze-mods"])
+        logging.info(f"Freeze modules with prefixes {config['freeze-mods']}.")
 
     # run training loop
     try:
