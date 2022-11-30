@@ -8,6 +8,7 @@
 
 num_dev=100
 num_eval=100
+num_train=932
 train_set="train_nodev"
 dev_set="dev"
 eval_set="eval"
@@ -90,13 +91,13 @@ diff -q <(awk '{print $1}' "${scp}") <(awk '{print $1}' "${segments}") > /dev/nu
 # split
 num_all=$(wc -l < "${scp}")
 num_deveval=$((num_dev + num_eval))
-num_train=$((num_all - num_deveval))
+num_train_temp=$((num_all - num_deveval))
 utils/split_data.sh \
-    --num_first "${num_train}" \
+    --num_first "${num_train_temp}" \
     --num_second "${num_deveval}" \
     --shuffle "${shuffle}" \
     "${data_dir}/all" \
-    "${data_dir}/${train_set}" \
+    "${data_dir}/${train_set}_temp" \
     "${data_dir}/deveval"
 utils/split_data.sh \
     --num_first "${num_dev}" \
@@ -105,6 +106,25 @@ utils/split_data.sh \
     "${data_dir}/deveval" \
     "${data_dir}/${dev_set}" \
     "${data_dir}/${eval_set}"
+
+# check if further splitting is necessary
+num_train_temp2=$((num_train_temp - num_train))
+if [ ${num_train_temp2} -gt 0 ]; then
+    utils/split_data.sh \
+        --num_first "${num_train}" \
+        --num_second "${num_train_temp2}" \
+        --shuffle "${shuffle}" \
+        "${data_dir}/${train_set}_temp" \
+        "${data_dir}/${train_set}" \
+        "${data_dir}/${train_set}_temp2"
+    rm -rf "${data_dir}/${train_set}_temp"
+    rm -rf "${data_dir}/${train_set}_temp2"
+elif [ ${num_train_temp2} -eq 0 ]; then
+    mv "${data_dir}/${train_set}_temp" "${data_dir}/${train_set}"
+else
+    echo "Please make sure num_train (${num_train}) + num_dev (${num_dev}) + num_eval (${num_eval}) = 1132."
+    exit 1
+fi
 
 # remove tmp directories
 rm -rf "${data_dir}/all"

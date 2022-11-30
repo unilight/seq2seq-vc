@@ -20,7 +20,7 @@ db_root=downloads
 dumpdir=dump                # directory to dump full features
 srcspk=clb                  # available speakers: "slt" "clb" "bdl" "rms"
 trgspk=slt
-num_train_utts=932
+num_train=932
 stats_ext=h5
 norm_name=                  # used to specify normalized data.
                             # Ex: `judy` for normalization with pretrained model, `self` for self-normalization
@@ -42,17 +42,6 @@ checkpoint=""               # checkpoint path to be used for decoding
 . utils/parse_options.sh || exit 1;
 
 set -euo pipefail
-
-pair=${srcspk}_${trgspk}
-src_train_set=${srcspk}_train
-src_dev_set=${srcspk}_dev
-src_eval_set=${srcspk}_eval
-trg_train_set=${trgspk}_train
-trg_dev_set=${trgspk}_dev
-trg_eval_set=${trgspk}_eval
-pair_train_set=${pair}_train
-pair_dev_set=${pair}_dev
-pair_eval_set=${pair}_eval
 
 # sanity check for norm_name and pretrained_model_checkpoint
 if [ -z ${norm_name} ]; then
@@ -91,9 +80,10 @@ if [ ${stage} -le 0 ] && [ ${stop_stage} -ge 0 ]; then
     echo "stage 0: Data preparation"
     for spk in ${srcspk} ${trgspk}; do
         local/data_prep.sh \
-            --train_set "${spk}_train" \
+            --train_set "${spk}_train_${num_train}" \
             --dev_set "${spk}_dev" \
             --eval_set "${spk}_eval" \
+            --num_train ${num_train} \
             "${db_root}/cmu_us_${spk}_arctic" "${spk}" data
     done
 fi
@@ -110,7 +100,7 @@ if [ "${stage}" -le 1 ] && [ "${stop_stage}" -ge 1 ]; then
 
     # extract raw features
     pids=()
-    for name in "${srcspk}_train" "${srcspk}_dev" "${srcspk}_eval" "${trgspk}_train" "${trgspk}_dev" "${trgspk}_eval"; do
+    for name in "${srcspk}_train_${num_train}" "${srcspk}_dev" "${srcspk}_eval" "${trgspk}_train_${num_train}" "${trgspk}_dev" "${trgspk}_eval"; do
     (
         [ ! -e "${dumpdir}/${name}/raw" ] && mkdir -p "${dumpdir}/${name}/raw"
         echo "Feature extraction start. See the progress via ${dumpdir}/${name}/raw/preprocessing.*.log."
@@ -136,7 +126,7 @@ if [ "${stage}" -le 2 ] && [ "${stop_stage}" -ge 2 ]; then
 
     if [ ${norm_name} == "self" ]; then
         # calculate statistics for normalization
-        for name in "${srcspk}_train" "${trgspk}_train"; do
+        for name in "${srcspk}_train_${num_train}" "${trgspk}_train_${num_train}"; do
         (
             echo "Statistics computation start. See the progress via ${dumpdir}/${name}/compute_statistics.log."
             ${train_cmd} "${dumpdir}/${name}/compute_statistics.log" \
@@ -153,16 +143,23 @@ if [ "${stage}" -le 2 ] && [ "${stop_stage}" -ge 2 ]; then
         echo "Successfully finished calculation of statistics."
     fi
 
+    # if norm_name=self, then use $conf; else use config in pretrained_model_dir
+    if [ ${norm_name} == "self" ]; then
+        config_for_feature_extraction="${conf}"
+    else
+        config_for_feature_extraction="${pretrained_model_dir}/config.yml"
+    fi
+
     # normalize and dump them
     for spk in ${srcspk} ${trgspk}; do
         pids=()
-        for name in "${spk}_train" "${spk}_dev" "${spk}_eval"; do
+        for name in "${spk}_train_${num_train}" "${spk}_dev" "${spk}_eval"; do
         (
             [ ! -e "${dumpdir}/${name}/norm_${norm_name}" ] && mkdir -p "${dumpdir}/${name}/norm_${norm_name}"
             echo "Nomalization start. See the progress via ${dumpdir}/${name}/norm_${norm_name}/normalize.*.log."
             ${train_cmd} JOB=1:${n_jobs} "${dumpdir}/${name}/norm_${norm_name}/normalize.JOB.log" \
                 normalize.py \
-                    --config "${conf}" \
+                    --config "${config_for_feature_extraction}" \
                     --stats "${stats}" \
                     --rootdir "${dumpdir}/${name}/raw/dump.JOB" \
                     --dumpdir "${dumpdir}/${name}/norm_${norm_name}/dump.JOB" \
@@ -180,9 +177,9 @@ fi
 
 
 if [ -z ${tag} ]; then
-    expname=${srcspk}_${trgspk}_$(basename ${conf%.*})
+    expname=${srcspk}_${trgspk}_${num_train}_$(basename ${conf%.*})
 else
-    expname=${srcspk}_${trgspk}_${tag}
+    expname=${srcspk}_${trgspk}_${num_train}_${tag}
 fi
 expdir=exp/${expname}
 if [ "${stage}" -le 3 ] && [ "${stop_stage}" -ge 3 ]; then
@@ -203,9 +200,9 @@ if [ "${stage}" -le 3 ] && [ "${stop_stage}" -ge 3 ]; then
             vc_train.py \
                 --config "${expdir}/original_config.yml" \
                 --additional-config "${conf}" \
-                --src-train-dumpdir "${dumpdir}/${srcspk}_train/norm_${norm_name}" \
+                --src-train-dumpdir "${dumpdir}/${srcspk}_train_${num_train}/norm_${norm_name}" \
                 --src-dev-dumpdir "${dumpdir}/${srcspk}_dev/norm_${norm_name}" \
-                --trg-train-dumpdir "${dumpdir}/${trgspk}_train/norm_${norm_name}" \
+                --trg-train-dumpdir "${dumpdir}/${trgspk}_train_${num_train}/norm_${norm_name}" \
                 --trg-dev-dumpdir "${dumpdir}/${trgspk}_dev/norm_${norm_name}" \
                 --trg-stats "${expdir}/stats.${stats_ext}" \
                 --init-checkpoint "${expdir}/original_${pretrained_model_checkpoint_name}.pkl" \
@@ -213,14 +210,14 @@ if [ "${stage}" -le 3 ] && [ "${stop_stage}" -ge 3 ]; then
                 --resume "${resume}" \
                 --verbose "${verbose}"
     else
-        cp "${dumpdir}/${trgspk}_train/stats.${stats_ext}" "${expdir}/"
+        cp "${dumpdir}/${trgspk}_train_${num_train}/stats.${stats_ext}" "${expdir}/"
         echo "Training start. See the progress via ${expdir}/train.log."
         ${cuda_cmd} --gpu "${n_gpus}" "${expdir}/train.log" \
             vc_train.py \
                 --config "${conf}" \
-                --src-train-dumpdir "${dumpdir}/${srcspk}_train/norm_${norm_name}" \
+                --src-train-dumpdir "${dumpdir}/${srcspk}_train_${num_train}/norm_${norm_name}" \
                 --src-dev-dumpdir "${dumpdir}/${srcspk}_dev/norm_${norm_name}" \
-                --trg-train-dumpdir "${dumpdir}/${trgspk}_train/norm_${norm_name}" \
+                --trg-train-dumpdir "${dumpdir}/${trgspk}_train_${num_train}/norm_${norm_name}" \
                 --trg-dev-dumpdir "${dumpdir}/${trgspk}_dev/norm_${norm_name}" \
                 --trg-stats "${expdir}/stats.${stats_ext}" \
                 --outdir "${expdir}" \
