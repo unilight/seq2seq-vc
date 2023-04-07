@@ -5,6 +5,7 @@ import torch
 from torch.optim.lr_scheduler import _LRScheduler
 from abc import ABC, abstractmethod
 
+
 class AbsBatchStepScheduler(ABC):
     @abstractmethod
     def step(self, epoch: int = None):

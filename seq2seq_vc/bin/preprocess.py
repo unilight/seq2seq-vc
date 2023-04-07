@@ -232,9 +232,9 @@ def main():
         # apply global gain
         if config["global_gain_scale"] > 0.0:
             audio *= config["global_gain_scale"]
-        if np.abs(audio).max() >= 1.0:
+        if np.abs(audio).max() > 1.0:
             logging.warn(
-                f"{utt_id} causes clipping. "
+                f"{utt_id} causes clipping (max: {np.abs(audio).max()}). "
                 "it is better to re-consider global gain scale."
             )
             continue

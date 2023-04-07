@@ -1,15 +1,17 @@
+import logging
 import torch
 
 from seq2seq_vc.layers.positional_encoding import ScaledPositionalEncoding
-from seq2seq_vc.modules.transformer.encoder import Encoder
+from seq2seq_vc.modules.transformer.encoder import Encoder as TransformerEncoder
+from seq2seq_vc.modules.conformer.encoder import Encoder as ConformerEncoder
 from seq2seq_vc.modules.transformer.decoder import Decoder
 from seq2seq_vc.modules.pre_postnets import Prenet, Postnet
-from seq2seq_vc.modules.transformer.mask import subsequent_mask, target_mask
+from seq2seq_vc.modules.transformer.mask import subsequent_mask
 from seq2seq_vc.layers.utils import make_non_pad_mask
 from seq2seq_vc.modules.transformer.attention import MultiHeadedAttention
 
+
 class VTN(torch.nn.Module):
-    
     def __init__(
         self,
         idim,
@@ -18,6 +20,8 @@ class VTN(torch.nn.Module):
         dprenet_units=256,
         adim=384,
         aheads=4,
+        encoder_type="transformer",
+        decoder_type="transformer",
         elayers=6,
         eunits=1536,
         dlayers=6,
@@ -25,7 +29,12 @@ class VTN(torch.nn.Module):
         postnet_layers=5,
         postnet_filts=5,
         postnet_chans=256,
+        positionwise_layer_type: str = "linear",
+        positionwise_conv_kernel_size: int = 1,
         dprenet_dropout_rate=0.5,
+        transformer_enc_dropout_rate: float = 0.1,
+        transformer_enc_positional_dropout_rate: float = 0.1,
+        transformer_enc_attn_dropout_rate: float = 0.1,
         use_batch_norm=True,
         encoder_normalize_before=True,
         decoder_normalize_before=False,
@@ -34,8 +43,22 @@ class VTN(torch.nn.Module):
         decoder_reduction_factor=2,
         spk_embed_dim=None,
         spk_embed_integration_type="add",
+        # only for scaled pos encoding
         initial_encoder_alpha=1.0,
         initial_decoder_alpha=1.0,
+        # guided attention loss related
+        use_guided_attn_loss=False,
+        num_heads_applied_guided_attn=2,
+        num_layers_applied_guided_attn=2,
+        # only for conformer
+        conformer_rel_pos_type: str = "legacy",
+        conformer_pos_enc_layer_type: str = "rel_pos",
+        conformer_self_attn_layer_type: str = "rel_selfattn",
+        use_macaron_style_in_conformer: bool = True,
+        use_cnn_in_conformer: bool = True,
+        zero_triu: bool = False,
+        conformer_enc_kernel_size: int = 7,
+        conformer_dec_kernel_size: int = 31,
     ):
         # initialize base classes
         torch.nn.Module.__init__(self)
@@ -47,31 +70,87 @@ class VTN(torch.nn.Module):
         if self.spk_embed_dim is not None:
             self.spk_embed_integration_type = spk_embed_integration_type
         self.decoder_reduction_factor = decoder_reduction_factor
+        self.use_guided_attn_loss = use_guided_attn_loss
+        self.num_heads_applied_guided_attn = num_heads_applied_guided_attn
+        self.num_layers_applied_guided_attn = num_layers_applied_guided_attn
+        self.encoder_type = encoder_type
+        self.decoder_type = decoder_type
 
         # use idx 0 as padding idx
         padding_idx = 0
 
+        # check relative positional encoding compatibility
+        if encoder_type == "conformer":
+            if conformer_rel_pos_type == "legacy":
+                if conformer_pos_enc_layer_type == "rel_pos":
+                    conformer_pos_enc_layer_type = "legacy_rel_pos"
+                    logging.warning(
+                        "Fallback to conformer_pos_enc_layer_type = 'legacy_rel_pos' "
+                        "due to the compatibility. If you want to use the new one, "
+                        "please use conformer_pos_enc_layer_type = 'latest'."
+                    )
+                if conformer_self_attn_layer_type == "rel_selfattn":
+                    conformer_self_attn_layer_type = "legacy_rel_selfattn"
+                    logging.warning(
+                        "Fallback to "
+                        "conformer_self_attn_layer_type = 'legacy_rel_selfattn' "
+                        "due to the compatibility. If you want to use the new one, "
+                        "please use conformer_pos_enc_layer_type = 'latest'."
+                    )
+            elif conformer_rel_pos_type == "latest":
+                assert conformer_pos_enc_layer_type != "legacy_rel_pos"
+                assert conformer_self_attn_layer_type != "legacy_rel_selfattn"
+            else:
+                raise ValueError(f"Unknown rel_pos_type: {conformer_rel_pos_type}")
+
         # define encoder
-        self.encoder = Encoder(
-            idim=idim,
-            attention_dim=adim,
-            attention_heads=aheads,
-            linear_units=eunits,
-            num_blocks=elayers,
-            input_layer="conv2d-scaled-pos-enc",
-            pos_enc_class=ScaledPositionalEncoding,
-            normalize_before=encoder_normalize_before,
-            concat_after=encoder_concat_after,
-        )
+        if encoder_type == "transformer":
+            self.encoder = TransformerEncoder(
+                idim=idim,
+                attention_dim=adim,
+                attention_heads=aheads,
+                linear_units=eunits,
+                num_blocks=elayers,
+                input_layer="conv2d-scaled-pos-enc",
+                pos_enc_class=ScaledPositionalEncoding,
+                normalize_before=encoder_normalize_before,
+                concat_after=encoder_concat_after,
+                positionwise_layer_type=positionwise_layer_type,  # V
+                positionwise_conv_kernel_size=positionwise_conv_kernel_size,  # V
+                dropout_rate=transformer_enc_dropout_rate,
+            )
+        elif encoder_type == "conformer":
+            self.encoder = ConformerEncoder(
+                idim=idim,
+                attention_dim=adim,
+                attention_heads=aheads,
+                linear_units=eunits,
+                num_blocks=elayers,
+                input_layer="conv2d",
+                normalize_before=encoder_normalize_before,
+                concat_after=encoder_concat_after,
+                positionwise_layer_type=positionwise_layer_type,  # V
+                positionwise_conv_kernel_size=positionwise_conv_kernel_size,  # V
+                # the following args are unique to Conformer
+                dropout_rate=transformer_enc_dropout_rate,
+                positional_dropout_rate=transformer_enc_positional_dropout_rate,
+                attention_dropout_rate=transformer_enc_attn_dropout_rate,
+                macaron_style=use_macaron_style_in_conformer,
+                pos_enc_layer_type=conformer_pos_enc_layer_type,
+                selfattention_layer_type=conformer_self_attn_layer_type,
+                use_cnn_module=use_cnn_in_conformer,
+                cnn_module_kernel=conformer_enc_kernel_size,
+                zero_triu=zero_triu,
+            )
+        else:
+            raise NotImplementedError
 
         # define projection layer
         if self.spk_embed_dim is not None:
             if self.spk_embed_integration_type == "add":
                 self.projection = torch.nn.Linear(self.spk_embed_dim, adim)
             else:
-                self.projection = torch.nn.Linear(
-                    adim + self.spk_embed_dim, adim
-                )
+                self.projection = torch.nn.Linear(adim + self.spk_embed_dim, adim)
         # define decoder prenet
         decoder_input_layer = torch.nn.Sequential(
             Prenet(
@@ -86,7 +165,7 @@ class VTN(torch.nn.Module):
         # define decoder
         # the reason why odim=-1 is because the final output dimention is decided by feat_out
         self.decoder = Decoder(
-            odim=-1, 
+            odim=-1,
             attention_dim=adim,
             attention_heads=aheads,
             linear_units=dunits,
@@ -112,9 +191,18 @@ class VTN(torch.nn.Module):
             use_batch_norm=use_batch_norm,
         )
 
-        # initialize scaled position encoding
-        self.encoder.embed[-1].alpha.data = torch.tensor(initial_encoder_alpha)
-        self.decoder.embed[-1].alpha.data = torch.tensor(initial_decoder_alpha)
+        # initialize parameters
+        self._reset_parameters(
+            init_enc_alpha=initial_encoder_alpha,
+            init_dec_alpha=initial_decoder_alpha,
+        )
+
+    def _reset_parameters(self, init_enc_alpha: float, init_dec_alpha: float):
+        # initialize alpha in scaled positional encoding
+        if self.encoder_type == "transformer":
+            self.encoder.embed[-1].alpha.data = torch.tensor(init_enc_alpha)
+        if self.decoder_type == "transformer":
+            self.decoder.embed[-1].alpha.data = torch.tensor(init_dec_alpha)
 
     def forward(self, xs, ilens, ys, labels, olens, spembs=None, *args, **kwargs):
         max_ilen = max(ilens)
@@ -137,8 +225,17 @@ class VTN(torch.nn.Module):
 
         # thin out frames for reduction factor (B, Lmax, odim) ->  (B, Lmax//r, odim)
         if self.decoder_reduction_factor > 1:
-            ys_in = ys[:, self.decoder_reduction_factor - 1 :: self.decoder_reduction_factor]
-            olens_in = olens.new([torch.div(olen, self.decoder_reduction_factor, rounding_mode='floor') for olen in olens])
+            ys_in = ys[
+                :, self.decoder_reduction_factor - 1 :: self.decoder_reduction_factor
+            ]
+            olens_in = olens.new(
+                [
+                    torch.div(
+                        olen, self.decoder_reduction_factor, rounding_mode="floor"
+                    )
+                    for olen in olens
+                ]
+            )
         else:
             ys_in, olens_in = ys, olens
 
@@ -166,7 +263,9 @@ class VTN(torch.nn.Module):
             assert olens.ge(
                 self.decoder_reduction_factor
             ).all(), "Output length must be greater than or equal to reduction factor."
-            olens = olens.new([olen - olen % self.decoder_reduction_factor for olen in olens])
+            olens = olens.new(
+                [olen - olen % self.decoder_reduction_factor for olen in olens]
+            )
             max_olen = max(olens)
             ys = ys[:, :max_olen]
             labels = labels[:, :max_olen]
@@ -174,7 +273,32 @@ class VTN(torch.nn.Module):
                 labels, 1, (olens - 1).unsqueeze(1), 1.0
             )  # see #3388
 
-        return after_outs, before_outs, logits, ys, labels, olens
+        # calculate guided attention loss
+        att_ws = []
+        # modify mask because of conv2d. Use ceiling division here
+        ilens_ds_st = ilens.new([((ilen - 2 + 1) // 2 - 2 + 1) // 2 for ilen in ilens])
+        if self.use_guided_attn_loss:
+            for idx, layer_idx in enumerate(
+                reversed(range(len(self.decoder.decoders)))
+            ):
+                att_ws += [
+                    self.decoder.decoders[layer_idx].src_attn.attn[
+                        :, : self.num_heads_applied_guided_attn
+                    ]
+                ]
+                if idx + 1 == self.num_layers_applied_guided_attn:
+                    break
+            att_ws = torch.cat(att_ws, dim=1)  # (B, H*L, T_out, T_in)
+
+        return (
+            after_outs,
+            before_outs,
+            logits,
+            ys,
+            labels,
+            olens,
+            (att_ws, ilens_ds_st, olens_in),
+        )
 
     def inference(self, x, inference_args, spemb=None, *args, **kwargs):
         """Generate the sequence of features given the sequences of acoustic features.
@@ -280,7 +404,7 @@ class VTN(torch.nn.Module):
         skip_output=False,
         keep_tensor=False,
         *args,
-        **kwargs
+        **kwargs,
     ):
         """Calculate all of the attention weights.
 

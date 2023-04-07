@@ -41,7 +41,7 @@ checkpoint=""               # checkpoint path to be used for decoding
 oov="\<unk\>"         # Out of vocabrary symbol.
 blank="\<blank\>"     # CTC blank symbol.
 sos_eos="\<sos/eos\>" # sos and eos symbols.
-token_type="char"
+token_type="phn"
 nlsyms_txt=none  # Non-linguistic symbol list (needed if existing).
 cleaner=tacotron # Text cleaner.
 g2p=g2p_en       # g2p method (needed if token_type=phn).

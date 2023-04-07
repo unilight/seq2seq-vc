@@ -112,9 +112,9 @@ class Spectrogram2Waveform(object):
 
     def __init__(
         self,
-        stats,
         n_fft: int,
         n_shift: int,
+        stats=None,
         fs: int = None,
         n_mels: int = None,
         win_length: int = None,
@@ -122,6 +122,7 @@ class Spectrogram2Waveform(object):
         fmin: int = None,
         fmax: int = None,
         griffin_lim_iters: Optional[int] = 8,
+        take_norm_feat: bool = True,
     ):
         """Initialize module.
 
@@ -137,7 +138,13 @@ class Spectrogram2Waveform(object):
             griffin_lim_iters: The number of iterations.
 
         """
+        self.take_norm_feat = take_norm_feat
         self.stats = stats
+
+        # sanity check
+        if self.take_norm_feat:
+            assert self.stats is not None, "must specify stats if take_norm_feat=True."
+
         self.fs = fs
         self.logmel2linear = (
             partial(
@@ -186,8 +193,9 @@ class Spectrogram2Waveform(object):
         dtype = spc.dtype
         spc = spc.cpu().numpy()
 
-        # denormalize with target stats
-        spc = spc * self.stats["scale"] + self.stats["mean"]
+        if self.take_norm_feat:
+            # denormalize with target stats
+            spc = spc * self.stats["scale"] + self.stats["mean"]
 
         if self.logmel2linear is not None:
             spc = self.logmel2linear(spc)

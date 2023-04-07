@@ -14,10 +14,12 @@ import torch
 # from espnet.nets.pytorch_backend.nets_utils import rename_state_dict
 from seq2seq_vc.modules.transformer.attention import MultiHeadedAttention
 from seq2seq_vc.modules.transformer.decoder_layer import DecoderLayer
+
 # from espnet.nets.pytorch_backend.transformer.dynamic_conv import DynamicConvolution
 # from espnet.nets.pytorch_backend.transformer.dynamic_conv2d import DynamicConvolution2D
 from seq2seq_vc.layers.positional_encoding import PositionalEncoding
 from seq2seq_vc.modules.transformer.layer_norm import LayerNorm
+
 # from espnet.nets.pytorch_backend.transformer.lightconv import LightweightConvolution
 # from espnet.nets.pytorch_backend.transformer.lightconv2d import LightweightConvolution2D
 from seq2seq_vc.modules.transformer.mask import subsequent_mask
@@ -25,6 +27,7 @@ from seq2seq_vc.modules.transformer.positionwise_feed_forward import (
     PositionwiseFeedForward,
 )
 from seq2seq_vc.modules.transformer.repeat import repeat
+
 # from espnet.nets.scorer_interface import BatchScorerInterface
 
 

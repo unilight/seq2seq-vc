@@ -1,8 +1,10 @@
 import os
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
 
 def plot_attention(array, figname, figsize=(6, 4), dpi=150, origin="upper"):
     shape = array.shape
@@ -23,7 +25,10 @@ def plot_attention(array, figname, figsize=(6, 4), dpi=150, origin="upper"):
     plt.savefig(figname)
     plt.close()
 
-def plot_generated_and_ref_2d(array, figname, figsize=(6, 4), dpi=150, ref=None, origin="upper"):
+
+def plot_generated_and_ref_2d(
+    array, figname, figsize=(6, 4), dpi=150, ref=None, origin="upper"
+):
     if ref is None:
         plt.figure(figsize=figsize, dpi=dpi)
         plt.imshow(array.T, aspect="auto", origin=origin)
@@ -47,6 +52,7 @@ def plot_generated_and_ref_2d(array, figname, figsize=(6, 4), dpi=150, ref=None,
     plt.savefig(figname)
     plt.close()
 
+
 def plot_1d(array, figname, figsize=(6, 4), dpi=150, origin="upper"):
     # for eos probability
     plt.figure(figsize=figsize, dpi=dpi)
@@ -54,7 +60,7 @@ def plot_1d(array, figname, figsize=(6, 4), dpi=150, origin="upper"):
     plt.xlabel("Frame")
     plt.ylabel("Probability")
     plt.ylim([0, 1])
-   
+
     plt.tight_layout()
     if not os.path.exists(os.path.dirname(figname)):
         # NOTE: exist_ok = True is needed for parallel process decoding

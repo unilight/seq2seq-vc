@@ -18,15 +18,15 @@ conf=conf/vtn.v1.yaml
 # dataset configuration
 db_root=downloads
 dumpdir=dump                # directory to dump full features
-srcspk=clb                  # available speakers: "slt" "clb" "bdl" "rms"
-trgspk=slt
+srcspk=clb                  # available speakers: "clb" "bdl"
+trgspk=slt                  # available speakers: "slt" "rms"
 num_train=932
 stats_ext=h5
 norm_name=                  # used to specify normalized data.
                             # Ex: `judy` for normalization with pretrained model, `self` for self-normalization
 
 # pretrained model related
-pretrained_model_checkpoint=
+pretrained_model_checkpoint=downloads/pretrained_models/ljspeech/transformer_tts_aept/checkpoint-50000steps.pkl
 
 # training related setting
 tag=""     # tag for directory to save model
@@ -68,9 +68,9 @@ if [ ${stage} -le -1 ] && [ ${stop_stage} -ge -1 ]; then
     local/data_download.sh ${db_root} ${trgspk}
 
     # download pretrained model for training
-    #if [ -n "${pretrained_model}" ]; then
-    #    local/pretrained_model_download.sh ${db_root} ${pretrained_model}
-    #fi
+    utils/hf_download.py --repo_id "unilight/seq2seq-vc" --outdir "downloads/pretrained_models" --filename "ljspeech/transformer_tts_aept/checkpoint-50000steps.pkl"
+    utils/hf_download.py --repo_id "unilight/seq2seq-vc" --outdir "downloads/pretrained_models" --filename "ljspeech/transformer_tts_aept/config.yml"
+    utils/hf_download.py --repo_id "unilight/seq2seq-vc" --outdir "downloads/pretrained_models" --filename "ljspeech/transformer_tts_aept/stats.h5"
 
     # download pretrained vocoder
     local/pretrained_model_download.sh ${db_root} pwg_${trgspk}
@@ -234,18 +234,24 @@ if [ "${stage}" -le 4 ] && [ "${stop_stage}" -ge 4 ]; then
     outdir="${expdir}/results/$(basename "${checkpoint}" .pkl)"
     pids=()
     for name in "${srcspk}_dev" "${srcspk}_eval"; do
+    (
         [ ! -e "${outdir}/${name}" ] && mkdir -p "${outdir}/${name}"
         [ "${n_gpus}" -gt 1 ] && n_gpus=1
-        echo "Decoding start. See the progress via ${outdir}/${name}/decode.log."
-        ${cuda_cmd} --gpu "${n_gpus}" "${outdir}/${name}/decode.log" \
+        echo "Decoding start. See the progress via ${outdir}/${name}/decode.*.log."
+        CUDA_VISIBLE_DEVICES="" ${cuda_cmd} JOB=1:${n_jobs} --gpu 0 "${outdir}/${name}/decode.JOB.log" \
             vc_decode.py \
-                --dumpdir "${dumpdir}/${name}/norm_${norm_name}" \
+                --dumpdir "${dumpdir}/${name}/norm_${norm_name}/dump.JOB" \
                 --checkpoint "${checkpoint}" \
                 --trg-stats "${expdir}/stats.${stats_ext}" \
-                --outdir "${outdir}/${name}" \
+                --outdir "${outdir}/${name}/out.JOB" \
                 --verbose "${verbose}"
         echo "Successfully finished decoding of ${name} set."
+        # for folder in "att_ws" "outs"
+    ) &
+    pids+=($!) # store background pids
     done
+    i=0; for pid in "${pids[@]}"; do wait ${pid} || ((i++)); done
+    [ ${i} -gt 0 ] && echo "$0: ${i} background jobs are failed." && false
     echo "Successfully finished decoding."
 fi
 
@@ -255,11 +261,10 @@ if [ ${stage} -le 5 ] && [ ${stop_stage} -ge 5 ]; then
     [ -z "${checkpoint}" ] && checkpoint="$(ls -dt "${expdir}"/*.pkl | head -1 || true)"
     outdir="${expdir}/results/$(basename "${checkpoint}" .pkl)"
     for name in "${srcspk}_dev" "${srcspk}_eval"; do
-        wavdir="${outdir}/${name}/wav"
         echo "Evaluation start. See the progress via ${outdir}/${name}/evaluation.log."
         ${cuda_cmd} --gpu "${n_gpus}" "${outdir}/${name}/evaluation.log" \
             local/evaluate.py \
-                --wavdir ${wavdir} \
+                --wavdir "${outdir}/${name}" \
                 --data_root "${db_root}/cmu_us_${trgspk}_arctic" \
                 --trgspk ${trgspk} \
                 --f0_path "conf/f0.yaml"

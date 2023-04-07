@@ -7,20 +7,14 @@ import logging
 
 import torch
 
-# from espnet.nets.pytorch_backend.nets_utils import rename_state_dict
-# from espnet.nets.pytorch_backend.transducer.vgg2l import VGG2L
 from seq2seq_vc.modules.transformer.attention import MultiHeadedAttention
-# from espnet.nets.pytorch_backend.transformer.dynamic_conv import DynamicConvolution
-# from espnet.nets.pytorch_backend.transformer.dynamic_conv2d import DynamicConvolution2D
 from seq2seq_vc.layers.positional_encoding import PositionalEncoding
 from seq2seq_vc.modules.transformer.encoder_layer import EncoderLayer
 from seq2seq_vc.modules.transformer.layer_norm import LayerNorm
-# from espnet.nets.pytorch_backend.transformer.lightconv import LightweightConvolution
-# from espnet.nets.pytorch_backend.transformer.lightconv2d import LightweightConvolution2D
-# from espnet.nets.pytorch_backend.transformer.multi_layer_conv import (
-#     Conv1dLinear,
-#     MultiLayeredConv1d,
-# )
+from seq2seq_vc.modules.transformer.multi_layer_conv import (
+    Conv1dLinear,
+    MultiLayeredConv1d,
+)
 from seq2seq_vc.modules.transformer.positionwise_feed_forward import (
     PositionwiseFeedForward,
 )

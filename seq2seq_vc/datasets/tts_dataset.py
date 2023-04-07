@@ -21,6 +21,7 @@ from seq2seq_vc.text.token_id_converter import TokenIDConverter
 from seq2seq_vc.utils import find_files
 from seq2seq_vc.utils import read_hdf5
 
+
 def read_2column_text(path):
     """Read a text file having 2 column as dict object.
 
@@ -45,6 +46,7 @@ def read_2column_text(path):
                 raise RuntimeError(f"{k} is duplicated ({path}:{linenum})")
             data[k] = v
     return data
+
 
 class TTSDataset(Dataset):
     """PyTorch compatible dataset for TTS."""
@@ -90,13 +92,13 @@ class TTSDataset(Dataset):
 
         # assert the number of files
         assert len(self.mel_files) != 0, f"Not found any mel files in ${root_dir}."
-        
+
         # load all text and filter those not in mel files
         mel_utt_ids = [os.path.splitext(os.path.basename(f))[0] for f in self.mel_files]
         self.utt_ids = mel_utt_ids
         texts = read_2column_text(text_path)
         self.texts = {k: v for k, v in texts.items() if k in mel_utt_ids}
-        
+
         self.mel_load_fn = mel_load_fn
         self.return_utt_id = return_utt_id
         self.allow_cache = allow_cache

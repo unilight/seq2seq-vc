@@ -23,14 +23,15 @@ from seq2seq_vc.datasets.tts_dataset import TTSDataset
 from seq2seq_vc.utils import read_hdf5
 from seq2seq_vc.utils.plot import plot_attention, plot_generated_and_ref_2d, plot_1d
 from seq2seq_vc.vocoder import Vocoder
+from seq2seq_vc.vocoder.s3prl_feat2wav import S3PRL_Feat2Wav
 from seq2seq_vc.vocoder.griffin_lim import Spectrogram2Waveform
+
 
 def main():
     """Run decoding process."""
     parser = argparse.ArgumentParser(
         description=(
-            "Decode with trained TTS model "
-            "(See detail in bin/tts_decode.py)."
+            "Decode with trained TTS model " "(See detail in bin/tts_decode.py)."
         )
     )
     parser.add_argument(
@@ -56,9 +57,7 @@ def main():
         "--text",
         required=True,
         type=str,
-        help=(
-            "raw input text file. "
-        ),
+        help=("raw input text file. "),
     )
     parser.add_argument(
         "--stats",
@@ -91,6 +90,14 @@ def main():
         help=(
             "yaml format configuration file. if not explicitly provided, "
             "it will be searched in the checkpoint directory. (default=None)"
+        ),
+    )
+    parser.add_argument(
+        "--feat-type",
+        type=str,
+        default="feats",
+        help=(
+            "target feature type. this is used as key name to read h5 feature files. "
         ),
     )
     parser.add_argument(
@@ -146,7 +153,7 @@ def main():
     # get dataset
     if args.dumpdir is not None:
         mel_query = "*.h5"
-        mel_load_fn = lambda x: read_hdf5(x, "feats")  # NOQA
+        mel_load_fn = lambda x: read_hdf5(x, args.feat_type)  # NOQA
         dataset = TTSDataset(
             root_dir=args.dumpdir,
             text_path=args.text,
@@ -175,26 +182,32 @@ def main():
         device = torch.device("cpu")
 
     # get model and load parameters
-    model_class = getattr(
-        seq2seq_vc.models,
-        config["model_type"]
-    )
+    model_class = getattr(seq2seq_vc.models, config["model_type"])
     model = model_class(**config["model_params"])
-    model.load_state_dict(
-        torch.load(args.checkpoint, map_location="cpu")["model"]
-    )
+    model.load_state_dict(torch.load(args.checkpoint, map_location="cpu")["model"])
     model = model.eval().to(device)
     logging.info(f"Loaded model parameters from {args.checkpoint}.")
 
     # load vocoder
     if config.get("vocoder", False):
-        vocoder = Vocoder(
-            config["vocoder"]["checkpoint"],
-            config["vocoder"]["config"],
-            config["vocoder"]["stats"],
-            config["trg_stats"],
-            device
-        )
+        if config["vocoder"].get("vocoder_type", "") == "s3prl_vc":
+            vocoder = S3PRL_Feat2Wav(
+                config["vocoder"]["checkpoint"],
+                config["vocoder"]["config"],
+                config["vocoder"]["stats"],
+                config["stats"],  # this is used to denormalized the converted features,
+                device,
+            )
+        else:
+            vocoder = Vocoder(
+                config["vocoder"]["checkpoint"],
+                config["vocoder"]["config"],
+                config["vocoder"]["stats"],
+                device,
+                trg_stats=config[
+                    "stats"
+                ],  # this is used to denormalized the converted features,
+            )
     else:
         vocoder = Spectrogram2Waveform(
             stats=config["stats"],
@@ -204,7 +217,7 @@ def main():
             n_mels=config["num_mels"],
             fmin=config["fmin"],
             fmax=config["fmax"],
-            griffin_lim_iters=64
+            griffin_lim_iters=64,
         )
 
     # start generation
@@ -212,7 +225,16 @@ def main():
         for _, (utt_id, x, _, _) in enumerate(pbar, 1):
             x = torch.tensor(x, dtype=torch.long).to(device)
             start_time = time.time()
+
             outs, probs, att_ws = model.inference(x, config["inference"], spemb=None)
+            # ilen = torch.from_numpy(np.array([x.shape[0]])).long()
+            # (outs, *_), *_ = model.inference(
+            #     x,
+            #     ilen,
+            #     noise_scale=config["inference"]["noise_scale"],
+            #     length_scale=config["inference"]["length_scale"],
+            # )
+
             logging.info(
                 "inference speed = %.1f frames / sec."
                 % (int(outs.size(0)) / (time.time() - start_time))
@@ -221,7 +243,7 @@ def main():
             plot_generated_and_ref_2d(
                 outs.cpu().numpy(),
                 config["outdir"] + f"/outs/{utt_id}.png",
-                origin="lower"
+                origin="lower",
             )
             plot_1d(
                 probs.cpu().numpy(),

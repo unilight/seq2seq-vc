@@ -12,7 +12,7 @@ import os
 import sys
 import time
 
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 
 import matplotlib
 import numpy as np
@@ -28,20 +28,29 @@ import seq2seq_vc
 import seq2seq_vc.models
 
 from seq2seq_vc.datasets import ParallelVCMelDataset
-from seq2seq_vc.losses import Seq2SeqLoss
+from seq2seq_vc.losses import Seq2SeqLoss, GuidedMultiHeadAttentionLoss
 from seq2seq_vc.utils import read_hdf5
 from seq2seq_vc.vocoder import Vocoder
-from seq2seq_vc.utils.model_io import freeze_modules, filter_modules, get_partial_state_dict, transfer_verification, print_new_keys
+from seq2seq_vc.vocoder.s3prl_feat2wav import S3PRL_Feat2Wav
+from seq2seq_vc.vocoder.griffin_lim import Spectrogram2Waveform
+from seq2seq_vc.utils.model_io import (
+    freeze_modules,
+    filter_modules,
+    get_partial_state_dict,
+    transfer_verification,
+    print_new_keys,
+)
 
 # set to avoid matplotlib error in CLI environment
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from seq2seq_vc.schedulers.warmup_lr import WarmupLR
-scheduler_classes = dict(
-    warmuplr=WarmupLR
-)
+
+scheduler_classes = dict(warmuplr=WarmupLR)
+
 
 class Trainer(object):
     """Customized trainer module for VC training."""
@@ -155,7 +164,7 @@ class Trainer(object):
 
         if os.path.isfile(checkpoint_path):
             model_state_dict = torch.load(checkpoint_path, map_location="cpu")["model"]
-            
+
             # first make sure that all modules in `init_mods` are in `checkpoint_path`
             modules = filter_modules(model_state_dict, init_mods)
 
@@ -163,9 +172,7 @@ class Trainer(object):
             partial_state_dict = get_partial_state_dict(model_state_dict, modules)
 
             if partial_state_dict:
-                if transfer_verification(
-                    main_state_dict, partial_state_dict, modules
-                ):
+                if transfer_verification(main_state_dict, partial_state_dict, modules):
                     print_new_keys(partial_state_dict, modules, checkpoint_path)
                     main_state_dict.update(partial_state_dict)
         else:
@@ -176,7 +183,7 @@ class Trainer(object):
             self.model.module.load_state_dict(main_state_dict)
         else:
             self.model.load_state_dict(main_state_dict)
-    
+
     def freeze_modules(self, freeze_mods):
         if self.config["distributed"]:
             freeze_modules(self.model.module, freeze_mods)
@@ -186,16 +193,35 @@ class Trainer(object):
     def _train_step(self, batch):
         """Train model one step."""
         # parse batch
-        xs, ilens, ys, labels, olens, spembs = tuple([_.to(self.device) if _ is not None else _ for _ in batch])
+        xs, ilens, ys, labels, olens, spembs = tuple(
+            [_.to(self.device) if _ is not None else _ for _ in batch]
+        )
 
         # model forward
-        after_outs, before_outs, logits, ys_, labels_, olens_ = self.model(xs, ilens, ys, labels, olens, spembs)
+        (
+            after_outs,
+            before_outs,
+            logits,
+            ys_,
+            labels_,
+            olens_,
+            (att_ws, ilens_ds_st, olens_in),
+        ) = self.model(xs, ilens, ys, labels, olens, spembs)
 
         # seq2seq loss
-        l1_loss, bce_loss = self.criterion(after_outs, before_outs, logits, ys_, labels_, olens_)
+        l1_loss, bce_loss = self.criterion["seq2seq"](
+            after_outs, before_outs, logits, ys_, labels_, olens_
+        )
         gen_loss = l1_loss + bce_loss
         self.total_train_loss["train/l1_loss"] += l1_loss.item()
         self.total_train_loss["train/bce_loss"] += bce_loss.item()
+
+        # guided attention loss
+        if self.config["use_guided_attn_loss"]:
+            ga_loss = self.criterion["guided_attn"](att_ws, ilens_ds_st, olens_in)
+            gen_loss += ga_loss
+            self.total_train_loss["train/guided_attn_loss"] += ga_loss.item()
+
         self.total_train_loss["train/loss"] += gen_loss.item()
 
         # update model
@@ -274,7 +300,9 @@ class Trainer(object):
         """Generate and save intermediate result."""
 
         # define function for plot prob and att_ws
-        def _plot_and_save(array, figname, figsize=(6, 4), dpi=150, ref=None, origin="upper"):
+        def _plot_and_save(
+            array, figname, figsize=(6, 4), dpi=150, ref=None, origin="upper"
+        ):
             shape = array.shape
             if len(shape) == 1:
                 # for eos probability
@@ -303,7 +331,9 @@ class Trainer(object):
             elif len(shape) == 4:
                 # for transformer attention weights,
                 # whose shape is (#leyers, #heads, out_length, in_length)
-                plt.figure(figsize=(figsize[0] * shape[0], figsize[1] * shape[1]), dpi=dpi)
+                plt.figure(
+                    figsize=(figsize[0] * shape[0], figsize[1] * shape[1]), dpi=dpi
+                )
                 for idx1, xs in enumerate(array):
                     for idx2, x in enumerate(xs, 1):
                         plt.subplot(shape[0], shape[1], idx1 * shape[1] + idx2)
@@ -325,11 +355,16 @@ class Trainer(object):
             os.makedirs(dirname)
 
         # generate
-        xs, _, ys, _, olens, spembs = tuple([_.to(self.device) if _ is not None else _ for _ in batch])
-        if spembs is None: spembs = [None] * len(xs)
+        xs, _, ys, _, olens, spembs = tuple(
+            [_.to(self.device) if _ is not None else _ for _ in batch]
+        )
+        if spembs is None:
+            spembs = [None] * len(xs)
         for idx, (x, y, olen, spemb) in enumerate(zip(xs, ys, olens, spembs)):
             start_time = time.time()
-            outs, probs, att_ws = self.model.inference(x, self.config["inference"], spemb=spemb)
+            outs, probs, att_ws = self.model.inference(
+                x, self.config["inference"], spemb=spemb
+            )
             logging.info(
                 "inference speed = %.1f frames / sec."
                 % (int(outs.size(0)) / (time.time() - start_time))
@@ -339,7 +374,7 @@ class Trainer(object):
                 outs.cpu().numpy(),
                 dirname + f"/outs/{idx}_out.png",
                 ref=y[:olen].cpu().numpy(),
-                origin="lower"
+                origin="lower",
             )
             _plot_and_save(
                 probs.cpu().numpy(),
@@ -401,10 +436,10 @@ class Collater(object):
     """Customized collater for Pytorch DataLoader in training."""
 
     def __init__(self):
-        """Initialize customized collater for PyTorch DataLoader. """
+        """Initialize customized collater for PyTorch DataLoader."""
 
     def __call__(self, batch):
-        """Convert into batch tensors. """
+        """Convert into batch tensors."""
 
         def pad_list(xs, pad_value):
             """Perform padding for the list of tensors.
@@ -456,47 +491,53 @@ class Collater(object):
 def main():
     """Run training process."""
     parser = argparse.ArgumentParser(
-        description=(
-            "Train VC model (See detail in bin/vc_train.py)."
-        )
+        description=("Train VC model (See detail in bin/vc_train.py).")
     )
     parser.add_argument(
         "--src-train-dumpdir",
         required=True,
         type=str,
-        help=(
-            "directory including source training data. "
-        ),
+        help=("directory including source training data. "),
     )
     parser.add_argument(
         "--src-dev-dumpdir",
         required=True,
         type=str,
-        help=(
-            "directory including source development data. "
-        ),
+        help=("directory including source development data. "),
     )
     parser.add_argument(
         "--trg-train-dumpdir",
         required=True,
         type=str,
-        help=(
-            "directory including target training data. "
-        ),
+        help=("directory including target training data. "),
     )
     parser.add_argument(
         "--trg-dev-dumpdir",
         required=True,
         type=str,
-        help=(
-            "directory including target development data. "
-        ),
+        help=("directory including target development data. "),
     )
     parser.add_argument(
         "--trg-stats",
         type=str,
-        required=True,
+        default=None,
         help="stats file for target denormalization.",
+    )
+    parser.add_argument(
+        "--src-feat-type",
+        type=str,
+        default="feats",
+        help=(
+            "source feature type. this is used as key name to read h5 feature files. "
+        ),
+    )
+    parser.add_argument(
+        "--trg-feat-type",
+        type=str,
+        default="feats",
+        help=(
+            "target feature type. this is used as key name to read h5 feature files. "
+        ),
     )
     parser.add_argument(
         "--outdir",
@@ -610,25 +651,29 @@ def main():
         logging.info(f"{key} = {value}")
 
     # load target stats for denormalization
-    config["trg_stats"] = {
-        "mean": read_hdf5(args.trg_stats, "mean"),
-        "scale": read_hdf5(args.trg_stats, "scale")
-    }
+    if args.trg_stats is not None:
+        config["trg_stats"] = {
+            "mean": read_hdf5(args.trg_stats, "mean"),
+            "scale": read_hdf5(args.trg_stats, "scale"),
+        }
 
     # get dataset
     if config["format"] == "hdf5":
         mel_query = "*.h5"
-        mel_load_fn = lambda x: read_hdf5(x, "feats")  # NOQA
+        src_mel_load_fn = lambda x: read_hdf5(x, args.src_feat_type)  # NOQA
+        trg_mel_load_fn = lambda x: read_hdf5(x, args.trg_feat_type)  # NOQA
     elif config["format"] == "npy":
         mel_query = "*-feats.npy"
-        mel_load_fn = np.load
+        src_mel_load_fn = np.load
+        trg_mel_load_fn = np.load
     else:
         raise ValueError("support only hdf5 or npy format.")
     train_dataset = ParallelVCMelDataset(
         src_root_dir=args.src_train_dumpdir,
         trg_root_dir=args.trg_train_dumpdir,
         mel_query=mel_query,
-        mel_load_fn=mel_load_fn,
+        src_load_fn=src_mel_load_fn,
+        trg_load_fn=trg_mel_load_fn,
         allow_cache=config.get("allow_cache", False),  # keep compatibility
     )
     logging.info(f"The number of training files = {len(train_dataset)}.")
@@ -636,7 +681,8 @@ def main():
         src_root_dir=args.src_dev_dumpdir,
         trg_root_dir=args.trg_dev_dumpdir,
         mel_query=mel_query,
-        mel_load_fn=mel_load_fn,
+        src_load_fn=src_mel_load_fn,
+        trg_load_fn=trg_mel_load_fn,
         allow_cache=config.get("allow_cache", False),  # keep compatibility
     )
     logging.info(f"The number of development files = {len(dev_dataset)}.")
@@ -690,27 +736,56 @@ def main():
         seq2seq_vc.models,
         config.get("model_type", "VTN"),
     )
-    model = model_class(
-        **config["model_params"],
-    ).to(device)
+    model = model_class(**config["model_params"]).to(device)
 
     # load vocoder
     if config.get("vocoder", False):
-        vocoder = Vocoder(
-            config["vocoder"]["checkpoint"],
-            config["vocoder"]["config"],
-            config["vocoder"]["stats"],
-            config["trg_stats"],
-            device
-        )
+        if config["vocoder"].get("vocoder_type", "") == "s3prl_vc":
+            vocoder = S3PRL_Feat2Wav(
+                config["vocoder"]["checkpoint"],
+                config["vocoder"]["config"],
+                config["vocoder"]["stats"],
+                config[
+                    "trg_stats"
+                ],  # this is used to denormalized the converted features,
+                device,
+            )
+        else:
+            vocoder = Vocoder(
+                config["vocoder"]["checkpoint"],
+                config["vocoder"]["config"],
+                config["vocoder"]["stats"],
+                device,
+                trg_stats=config[
+                    "trg_stats"
+                ],  # this is used to denormalized the converted features,
+            )
     else:
-        vocoder = None
+        vocoder = Spectrogram2Waveform(
+            stats=config["trg_stats"],
+            n_fft=config["fft_size"],
+            n_shift=config["hop_size"],
+            fs=config["sampling_rate"],
+            n_mels=config["num_mels"],
+            fmin=config["fmin"],
+            fmax=config["fmax"],
+            griffin_lim_iters=64,
+        )
 
     # define criterions
-    criterion = Seq2SeqLoss(
-        # keep compatibility
-        **config.get("seq2seq_loss_params", {})
-    ).to(device)
+    criterion = {
+        "seq2seq": Seq2SeqLoss(
+            # keep compatibility
+            **config.get("seq2seq_loss_params", {})
+        ).to(device)
+    }
+    if config.get("use_guided_attn_loss", False):  # keep compatibility
+        criterion["guided_attn"] = GuidedMultiHeadAttentionLoss(
+            # keep compatibility
+            **config.get("guided_attn_loss_params", {}),
+        ).to(device)
+    else:
+        config["use_guided_attn_loss"] = False
 
     # define optimizers and schedulers
     optimizer_class = getattr(
@@ -761,7 +836,9 @@ def main():
 
     # load pretrained parameters from checkpoint
     if len(args.init_checkpoint) != 0:
-        trainer.load_trained_modules(args.init_checkpoint, init_mods=config["init-mods"])
+        trainer.load_trained_modules(
+            args.init_checkpoint, init_mods=config["init-mods"]
+        )
         logging.info(f"Successfully load parameters from {args.init_checkpoint}.")
 
     # resume from checkpoint

@@ -55,6 +55,12 @@ def main():
         help="yaml format configuration file.",
     )
     parser.add_argument(
+        "--feat_type",
+        type=str,
+        default="feats",
+        help=("feature type. this is used as key name to read h5 feature files. "),
+    )
+    parser.add_argument(
         "--dumpdir",
         default=None,
         type=str,
@@ -109,7 +115,7 @@ def main():
     if args.feats_scp is None:
         if config["format"] == "hdf5":
             mel_query = "*.h5"
-            mel_load_fn = lambda x: read_hdf5(x, "feats")  # NOQA
+            mel_load_fn = lambda x: read_hdf5(x, args.feat_type)  # NOQA
         elif config["format"] == "npy":
             mel_query = "*-feats.npy"
             mel_load_fn = np.load

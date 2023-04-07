@@ -28,8 +28,7 @@ def main():
     """Run preprocessing process."""
     parser = argparse.ArgumentParser(
         description=(
-            "Normalize dumped raw features (See detail in"
-            " bin/normalize.py)."
+            "Normalize dumped raw features (See detail in" " bin/normalize.py)."
         )
     )
     parser.add_argument(
@@ -58,6 +57,12 @@ def main():
         default=None,
         type=str,
         help="kaldi-style segments file.",
+    )
+    parser.add_argument(
+        "--feat_type",
+        type=str,
+        default="feats",
+        help=("feature type. this is used as key name to read h5 feature files. "),
     )
     parser.add_argument(
         "--dumpdir",
@@ -126,7 +131,7 @@ def main():
         if config["format"] == "hdf5":
             audio_query, mel_query = "*.h5", "*.h5"
             audio_load_fn = lambda x: read_hdf5(x, "wave")  # NOQA
-            mel_load_fn = lambda x: read_hdf5(x, "feats")  # NOQA
+            mel_load_fn = lambda x: read_hdf5(x, args.feat_type)  # NOQA
         elif config["format"] == "npy":
             audio_query, mel_query = "*-wave.npy", "*-feats.npy"
             audio_load_fn = np.load
@@ -191,7 +196,7 @@ def main():
         if config["format"] == "hdf5":
             write_hdf5(
                 os.path.join(args.dumpdir, f"{utt_id}.h5"),
-                "feats",
+                args.feat_type,
                 mel.astype(np.float32),
             )
             if not args.skip_wav_copy:

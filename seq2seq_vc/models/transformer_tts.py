@@ -1,16 +1,16 @@
 import torch
 import torch.nn.functional as F
 
-from seq2seq_vc.layers.positional_encoding import PositionalEncoding, ScaledPositionalEncoding
+from seq2seq_vc.layers.positional_encoding import ScaledPositionalEncoding
 from seq2seq_vc.modules.transformer.encoder import Encoder
 from seq2seq_vc.modules.transformer.decoder import Decoder
 from seq2seq_vc.modules.pre_postnets import Prenet, Postnet
-from seq2seq_vc.modules.transformer.mask import subsequent_mask, target_mask
+from seq2seq_vc.modules.transformer.mask import subsequent_mask
 from seq2seq_vc.layers.utils import make_non_pad_mask
 from seq2seq_vc.modules.transformer.attention import MultiHeadedAttention
 
+
 class TransformerTTS(torch.nn.Module):
-    
     def __init__(
         self,
         idim,
@@ -37,6 +37,9 @@ class TransformerTTS(torch.nn.Module):
         spk_embed_integration_type="add",
         initial_encoder_alpha=1.0,
         initial_decoder_alpha=1.0,
+        use_guided_attn_loss=False,
+        num_heads_applied_guided_attn=2,
+        num_layers_applied_guided_attn=2,
     ):
         # initialize base classes
         torch.nn.Module.__init__(self)
@@ -49,6 +52,9 @@ class TransformerTTS(torch.nn.Module):
         if self.spk_embed_dim is not None:
             self.spk_embed_integration_type = spk_embed_integration_type
         self.decoder_reduction_factor = decoder_reduction_factor
+        self.use_guided_attn_loss = use_guided_attn_loss
+        self.num_heads_applied_guided_attn = num_heads_applied_guided_attn
+        self.num_layers_applied_guided_attn = num_layers_applied_guided_attn
 
         # use idx 0 as padding idx
         self.padding_idx = 0
@@ -75,9 +81,7 @@ class TransformerTTS(torch.nn.Module):
             if self.spk_embed_integration_type == "add":
                 self.projection = torch.nn.Linear(self.spk_embed_dim, adim)
             else:
-                self.projection = torch.nn.Linear(
-                    adim + self.spk_embed_dim, adim
-                )
+                self.projection = torch.nn.Linear(adim + self.spk_embed_dim, adim)
         # define decoder prenet
         decoder_input_layer = torch.nn.Sequential(
             Prenet(
@@ -92,7 +96,7 @@ class TransformerTTS(torch.nn.Module):
         # define decoder
         # the reason why odim=-1 is because the final output dimention is decided by feat_out
         self.decoder = Decoder(
-            odim=-1, 
+            odim=-1,
             attention_dim=adim,
             attention_heads=aheads,
             linear_units=dunits,
@@ -149,8 +153,17 @@ class TransformerTTS(torch.nn.Module):
 
         # thin out frames for reduction factor (B, Lmax, odim) ->  (B, Lmax//r, odim)
         if self.decoder_reduction_factor > 1:
-            ys_in = ys[:, self.decoder_reduction_factor - 1 :: self.decoder_reduction_factor]
-            olens_in = olens.new([torch.div(olen, self.decoder_reduction_factor, rounding_mode='floor') for olen in olens])
+            ys_in = ys[
+                :, self.decoder_reduction_factor - 1 :: self.decoder_reduction_factor
+            ]
+            olens_in = olens.new(
+                [
+                    torch.div(
+                        olen, self.decoder_reduction_factor, rounding_mode="floor"
+                    )
+                    for olen in olens
+                ]
+            )
         else:
             ys_in, olens_in = ys, olens
 
@@ -178,7 +191,9 @@ class TransformerTTS(torch.nn.Module):
             assert olens.ge(
                 self.decoder_reduction_factor
             ).all(), "Output length must be greater than or equal to reduction factor."
-            olens = olens.new([olen - olen % self.decoder_reduction_factor for olen in olens])
+            olens = olens.new(
+                [olen - olen % self.decoder_reduction_factor for olen in olens]
+            )
             max_olen = max(olens)
             ys = ys[:, :max_olen]
             labels = labels[:, :max_olen]
@@ -186,7 +201,32 @@ class TransformerTTS(torch.nn.Module):
                 labels, 1, (olens - 1).unsqueeze(1), 1.0
             )  # see #3388
 
-        return after_outs, before_outs, logits, ys, labels, olens
+        # calculate guided attention loss
+        att_ws = []
+        if self.use_guided_attn_loss:
+
+            # modify mask because of conv2d. Use ceiling division here
+            for idx, layer_idx in enumerate(
+                reversed(range(len(self.decoder.decoders)))
+            ):
+                att_ws += [
+                    self.decoder.decoders[layer_idx].src_attn.attn[
+                        :, : self.num_heads_applied_guided_attn
+                    ]
+                ]
+                if idx + 1 == self.num_layers_applied_guided_attn:
+                    break
+            att_ws = torch.cat(att_ws, dim=1)  # (B, H*L, T_out, T_in)
+
+        return (
+            after_outs,
+            before_outs,
+            logits,
+            ys,
+            labels,
+            olens,
+            (att_ws, ilens, olens_in),
+        )
 
     def inference(self, x, inference_args, spemb=None, *args, **kwargs):
         """Generate the sequence of features given the sequences of acoustic features.

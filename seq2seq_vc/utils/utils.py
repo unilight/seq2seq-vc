@@ -271,10 +271,7 @@ def load_model(checkpoint, config, stats=None):
     import seq2seq_vc.models
 
     # get model and load parameters
-    model_class = getattr(
-        seq2seq_vc.models,
-        config["model_type"]
-    )
+    model_class = getattr(seq2seq_vc.models, config["model_type"])
     model = model_class(**config["model_params"])
     model.load_state_dict(
         torch.load(checkpoint, map_location="cpu")["model"]["generator"]

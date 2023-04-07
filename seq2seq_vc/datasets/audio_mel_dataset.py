@@ -343,6 +343,7 @@ class MelDataset(Dataset):
         """
         return len(self.mel_files)
 
+
 class ParallelVCMelDataset(Dataset):
     """PyTorch compatible mel-to-mel dataset for parallel VC."""
 
@@ -351,7 +352,8 @@ class ParallelVCMelDataset(Dataset):
         src_root_dir,
         trg_root_dir,
         mel_query="*-feats.npy",
-        mel_load_fn=np.load,
+        src_load_fn=np.load,
+        trg_load_fn=np.load,
         return_utt_id=False,
         allow_cache=False,
     ):
@@ -376,14 +378,21 @@ class ParallelVCMelDataset(Dataset):
 
         self.src_mel_files = src_mel_files
         self.trg_mel_files = trg_mel_files
-        self.mel_load_fn = mel_load_fn
-        
+        self.src_load_fn = src_load_fn
+        self.trg_load_fn = trg_load_fn
+
         # make sure the utt ids match
-        src_utt_ids = [os.path.splitext(os.path.basename(f))[0] for f in src_mel_files]
-        trg_utt_ids = [os.path.splitext(os.path.basename(f))[0] for f in trg_mel_files]
-        assert set(src_utt_ids) == set(trg_utt_ids)
+        src_utt_ids = sorted(
+            [os.path.splitext(os.path.basename(f))[0] for f in src_mel_files]
+        )
+        trg_utt_ids = sorted(
+            [os.path.splitext(os.path.basename(f))[0] for f in trg_mel_files]
+        )
+        assert set(src_utt_ids) == set(
+            trg_utt_ids
+        ), f"{len(set(src_utt_ids))} {len(set(trg_utt_ids))}{set(src_utt_ids).difference(set(trg_utt_ids))}"
         self.utt_ids = src_utt_ids
-        
+
         self.mel_files = list(zip(self.src_mel_files, self.trg_mel_files))
         self.return_utt_id = return_utt_id
         self.allow_cache = allow_cache
@@ -408,8 +417,8 @@ class ParallelVCMelDataset(Dataset):
             return self.caches[idx]
 
         utt_id = self.utt_ids[idx]
-        src_mel = self.mel_load_fn(self.mel_files[idx][0])
-        trg_mel = self.mel_load_fn(self.mel_files[idx][1])
+        src_mel = self.src_load_fn(self.mel_files[idx][0])
+        trg_mel = self.trg_load_fn(self.mel_files[idx][1])
 
         if self.return_utt_id:
             items = utt_id, src_mel, trg_mel
@@ -430,9 +439,10 @@ class ParallelVCMelDataset(Dataset):
         """
         return len(self.mel_files)
 
+
 class SourceVCMelDataset(Dataset):
     """PyTorch compatible mel dataset for VC.
-       Contains source side mel only, mainly designed for evaluation.
+    Contains source side mel only, mainly designed for evaluation.
     """
 
     def __init__(
@@ -457,10 +467,14 @@ class SourceVCMelDataset(Dataset):
         self.src_mel_files = sorted(find_files(src_root_dir, mel_query))
 
         # assert the number of files
-        assert len(self.src_mel_files) != 0, f"Not found any mel files in ${src_root_dir}."
+        assert (
+            len(self.src_mel_files) != 0
+        ), f"Not found any mel files in ${src_root_dir}."
 
         self.mel_load_fn = mel_load_fn
-        self.utt_ids = [os.path.splitext(os.path.basename(f))[0] for f in self.src_mel_files]
+        self.utt_ids = [
+            os.path.splitext(os.path.basename(f))[0] for f in self.src_mel_files
+        ]
         self.return_utt_id = return_utt_id
         self.allow_cache = allow_cache
         if allow_cache:

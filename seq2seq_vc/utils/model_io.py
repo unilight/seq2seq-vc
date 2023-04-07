@@ -1,11 +1,13 @@
 import logging
 from collections import OrderedDict
 
+
 def print_new_keys(state_dict, modules, model_path):
     logging.info(f"Loading {modules} from model: {model_path}")
 
     for k in state_dict.keys():
         logging.warning(f"Overriding module {k}")
+
 
 def filter_modules(model_state_dict, modules):
     """Filter non-matched modules in model state dict.
@@ -36,6 +38,7 @@ def filter_modules(model_state_dict, modules):
 
     return new_mods
 
+
 def get_partial_state_dict(model_state_dict, modules):
     """Create state dict with specified modules matching input model modules.
     Args:
@@ -51,6 +54,7 @@ def get_partial_state_dict(model_state_dict, modules):
             new_state_dict[key] = value
 
     return new_state_dict
+
 
 def transfer_verification(model_state_dict, partial_state_dict, modules):
     """Verify tuples (key, shape) for input model modules match specified modules.

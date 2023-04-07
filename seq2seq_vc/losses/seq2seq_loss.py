@@ -9,6 +9,7 @@ import torch.nn.functional as F
 
 from seq2seq_vc.layers.utils import make_non_pad_mask
 
+
 class Seq2SeqLoss(torch.nn.Module):
     """Loss function module for seq2seq VC."""
 
