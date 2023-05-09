@@ -13,7 +13,7 @@ import torch
 from tensorboardX import SummaryWriter
 
 class Trainer(object):
-    """Customized trainer module for VC training."""
+    """Customized trainer module for VC/TTS training."""
 
     def __init__(
         self,

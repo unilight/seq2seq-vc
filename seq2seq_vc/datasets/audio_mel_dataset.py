@@ -14,8 +14,7 @@ import numpy as np
 
 from torch.utils.data import Dataset
 
-from seq2seq_vc.utils import find_files
-from seq2seq_vc.utils import read_hdf5
+from seq2seq_vc.utils import find_files, read_hdf5, get_basename
 
 
 class AudioMelDataset(Dataset):
@@ -354,6 +353,8 @@ class ParallelVCMelDataset(Dataset):
         mel_query="*-feats.npy",
         src_load_fn=np.load,
         trg_load_fn=np.load,
+        durations_dir=None,
+        duration_query="*.txt",
         return_utt_id=False,
         allow_cache=False,
     ):
@@ -364,6 +365,8 @@ class ParallelVCMelDataset(Dataset):
             trg_root_dir (str): Root directory including dumped files for the target.
             mel_query (str): Query to find feature files in root_dir.
             mel_load_fn (func): Function to load feature file.
+            durations_dir (str): Root directory including duration files.
+            duration_query (str): Query to find duration files in src/trg_durations_dir.
             return_utt_id (bool): Whether to return the utterance id with arrays.
             allow_cache (bool): Whether to allow cache of the loaded files.
 
@@ -393,7 +396,8 @@ class ParallelVCMelDataset(Dataset):
         ), f"{len(set(src_utt_ids))} {len(set(trg_utt_ids))}{set(src_utt_ids).difference(set(trg_utt_ids))}"
         self.utt_ids = src_utt_ids
 
-        self.mel_files = list(zip(self.src_mel_files, self.trg_mel_files))
+        # use map(list, zip(...)) to get list of list
+        self.mel_files = list(map(list, zip(self.src_mel_files, self.trg_mel_files))) 
         self.return_utt_id = return_utt_id
         self.allow_cache = allow_cache
         if allow_cache:
@@ -401,6 +405,15 @@ class ParallelVCMelDataset(Dataset):
             self.manager = Manager()
             self.caches = self.manager.list()
             self.caches += [() for _ in range(len(self.mel_files))]
+
+        # load duration files and zip with mel_files
+        if durations_dir is not None:
+            duration_files = sorted(find_files(durations_dir, duration_query))
+            assert len(duration_files) == len(self.mel_files)
+            self.mel_files = [v + [duration_files[i]] for i, v in enumerate(self.mel_files)]
+            self.use_durations = True
+        else:
+            self.use_durations = False
 
     def __getitem__(self, idx):
         """Get specified idx items.
@@ -420,10 +433,22 @@ class ParallelVCMelDataset(Dataset):
         src_mel = self.src_load_fn(self.mel_files[idx][0])
         trg_mel = self.trg_load_fn(self.mel_files[idx][1])
 
+        # read durations if exists
+        if self.use_durations:
+            with open(self.mel_files[idx][2], "r") as f:
+                lines = f.read().splitlines()
+                assert len(lines) == 1
+                durations = np.array([int(d) for d in lines[0].split(" ")])
+
+            # force the target to have the same length as the duration sum
+            trg_mel = trg_mel[:np.sum(durations)]
+
+        items = [src_mel, trg_mel]
+
         if self.return_utt_id:
-            items = utt_id, src_mel, trg_mel
-        else:
-            items = src_mel, trg_mel
+            items = [utt_id] + items
+        if self.use_durations:
+            items.append(durations)
 
         if self.allow_cache:
             self.caches[idx] = items

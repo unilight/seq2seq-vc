@@ -277,18 +277,18 @@ class VTN(torch.nn.Module):
         att_ws = []
         # modify mask because of conv2d. Use ceiling division here
         ilens_ds_st = ilens.new([((ilen - 2 + 1) // 2 - 2 + 1) // 2 for ilen in ilens])
-        if self.use_guided_attn_loss:
-            for idx, layer_idx in enumerate(
-                reversed(range(len(self.decoder.decoders)))
-            ):
-                att_ws += [
-                    self.decoder.decoders[layer_idx].src_attn.attn[
-                        :, : self.num_heads_applied_guided_attn
-                    ]
+        for idx, layer_idx in enumerate(
+            reversed(range(len(self.decoder.decoders)))
+        ):
+            att_ws += [
+                self.decoder.decoders[layer_idx].src_attn.attn[
+                    # :, : self.num_heads_applied_guided_attn
+                    :, :
                 ]
-                if idx + 1 == self.num_layers_applied_guided_attn:
-                    break
-            att_ws = torch.cat(att_ws, dim=1)  # (B, H*L, T_out, T_in)
+            ]
+            # if idx + 1 == self.num_layers_applied_guided_attn:
+                # break
+        # att_ws = torch.cat(att_ws, dim=1)  # (B, H*L, T_out, T_in)
 
         return (
             after_outs,

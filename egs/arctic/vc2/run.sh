@@ -13,10 +13,10 @@ verbose=1      # verbosity level (lower is less info)
 n_gpus=1       # number of gpus in training
 n_jobs=16      # number of parallel jobs in feature extraction
 
-conf=conf/vtn.v1.yaml
+conf=conf/conformer_fastspeech.v1.yaml
 
 # dataset configuration
-db_root=downloads
+db_root=../vc1/downloads
 dumpdir=dump                # directory to dump full features
 srcspk=clb                  # available speakers: "clb" "bdl"
 trgspk=slt                  # available speakers: "slt" "rms"
@@ -24,9 +24,11 @@ num_train=932
 stats_ext=h5
 norm_name=                  # used to specify normalized data.
                             # Ex: `judy` for normalization with pretrained model, `self` for self-normalization
+train_duration_dir=/data/group1/z44476r/Experiments/seq2seq-vc/egs/arctic/vc1/exp/clb_slt_932_tts_pt_lr8e-5/results/checkpoint-15000steps/clb_train
+dev_duration_dir=/data/group1/z44476r/Experiments/seq2seq-vc/egs/arctic/vc1/exp/clb_slt_932_tts_pt_lr8e-5/results/checkpoint-15000steps/clb_dev
 
 # pretrained model related
-pretrained_model_checkpoint=downloads/pretrained_models/ljspeech/transformer_tts_aept/checkpoint-50000steps.pkl
+pretrained_model_checkpoint= #downloads/pretrained_models/ljspeech/transformer_tts_aept/checkpoint-50000steps.pkl
 
 # training related setting
 tag=""     # tag for directory to save model
@@ -52,7 +54,7 @@ elif [ ${norm_name} == "self" ]; then
         echo "You cannot specify pretrained_model_checkpoint and norm_name=self simultaneously."
         exit 1
     fi
-    stats="${dumpdir}/${trgspk}_train/stats.${stats_ext}"
+    stats="${dumpdir}/${trgspk}_train_${num_train}/stats.${stats_ext}"
 else
     if [ -z ${pretrained_model_checkpoint} ]; then
         echo "Please specify the pretrained model checkpoint."
@@ -60,20 +62,6 @@ else
     fi
     pretrained_model_dir="$(dirname ${pretrained_model_checkpoint})"
     stats="${pretrained_model_dir}/stats.${stats_ext}"
-fi
-
-if [ ${stage} -le -1 ] && [ ${stop_stage} -ge -1 ]; then
-    echo "stage -1: Data and Pretrained Model Download"
-    local/data_download.sh ${db_root} ${srcspk}
-    local/data_download.sh ${db_root} ${trgspk}
-
-    # download pretrained model for training
-    utils/hf_download.py --repo_id "unilight/seq2seq-vc" --outdir "downloads/pretrained_models" --filename "ljspeech/transformer_tts_aept/checkpoint-50000steps.pkl"
-    utils/hf_download.py --repo_id "unilight/seq2seq-vc" --outdir "downloads/pretrained_models" --filename "ljspeech/transformer_tts_aept/config.yml"
-    utils/hf_download.py --repo_id "unilight/seq2seq-vc" --outdir "downloads/pretrained_models" --filename "ljspeech/transformer_tts_aept/stats.h5"
-
-    # download pretrained vocoder
-    local/pretrained_model_download.sh ${db_root} pwg_${trgspk}
 fi
 
 if [ ${stage} -le 0 ] && [ ${stop_stage} -ge 0 ]; then
@@ -175,7 +163,6 @@ if [ "${stage}" -le 2 ] && [ "${stop_stage}" -ge 2 ]; then
     done
 fi
 
-
 if [ -z ${tag} ]; then
     expname=${srcspk}_${trgspk}_${num_train}_$(basename ${conf%.*})
 else
@@ -220,6 +207,8 @@ if [ "${stage}" -le 3 ] && [ "${stop_stage}" -ge 3 ]; then
                 --trg-train-dumpdir "${dumpdir}/${trgspk}_train_${num_train}/norm_${norm_name}" \
                 --trg-dev-dumpdir "${dumpdir}/${trgspk}_dev/norm_${norm_name}" \
                 --trg-stats "${expdir}/stats.${stats_ext}" \
+                --train-duration-dir ${train_duration_dir} \
+                --dev-duration-dir ${dev_duration_dir} \
                 --outdir "${expdir}" \
                 --resume "${resume}" \
                 --verbose "${verbose}"
@@ -246,6 +235,7 @@ if [ "${stage}" -le 4 ] && [ "${stop_stage}" -ge 4 ]; then
                 --outdir "${outdir}/${name}/out.JOB" \
                 --verbose "${verbose}"
         echo "Successfully finished decoding of ${name} set."
+        # for folder in "att_ws" "outs"
     ) &
     pids+=($!) # store background pids
     done
@@ -269,33 +259,4 @@ if [ ${stage} -le 5 ] && [ ${stop_stage} -ge 5 ]; then
                 --f0_path "conf/f0.yaml"
         grep "Mean MCD" "${outdir}/${name}/evaluation.log"
     done
-fi
-
-if [ "${stage}" -le 6 ] && [ "${stop_stage}" -ge 6 ]; then
-    echo "Stage 6: Teacher-forcing decoding"
-    # shellcheck disable=SC2012
-    [ -z "${checkpoint}" ] && checkpoint="$(ls -dt "${expdir}"/*.pkl | head -1 || true)"
-    outdir="${expdir}/results/$(basename "${checkpoint}" .pkl)"
-    pids=()
-    for name in "train" "dev"; do
-    (
-        [ ! -e "${outdir}/${srcspk}_${name}" ] && mkdir -p "${outdir}/${srcspk}_${name}"
-        [ "${n_gpus}" -gt 1 ] && n_gpus=1
-        echo "Decoding start. See the progress via ${outdir}/${srcspk}_${name}/decode.*.log."
-        CUDA_VISIBLE_DEVICES="" ${cuda_cmd} JOB=1:${n_jobs} --gpu 0 "${outdir}/${srcspk}_${name}/decode.JOB.log" \
-            vc_decode.py \
-                --dumpdir "${dumpdir}/${srcspk}_${name}/norm_${norm_name}/dump.JOB" \
-                --checkpoint "${checkpoint}" \
-                --trg-stats "${expdir}/stats.${stats_ext}" \
-                --outdir "${outdir}/${srcspk}_${name}/out.JOB" \
-                --verbose "${verbose}" \
-                --use-teacher-forcing True \
-                --trg-dumpdir "${dumpdir}/${trgspk}_${name}/norm_${norm_name}/dump.JOB"
-        echo "Successfully finished decoding of ${srcspk}_${name} set."
-    ) &
-    pids+=($!) # store background pids
-    done
-    i=0; for pid in "${pids[@]}"; do wait ${pid} || ((i++)); done
-    [ ${i} -gt 0 ] && echo "$0: ${i} background jobs are failed." && false
-    echo "Successfully finished decoding."
 fi

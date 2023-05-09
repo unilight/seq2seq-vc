@@ -13,7 +13,7 @@ from seq2seq_vc.layers.utils import make_non_pad_mask
 class Seq2SeqLoss(torch.nn.Module):
     """Loss function module for seq2seq VC."""
 
-    def __init__(self, bce_pos_weight=5.0):
+    def __init__(self, bce_pos_weight=10.0):
         """
         Args:
             bce_pos_weight (float): Weight of positive sample of stop token.

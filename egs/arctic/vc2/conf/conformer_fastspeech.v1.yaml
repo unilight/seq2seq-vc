@@ -20,53 +20,68 @@ format: "hdf5"           # Feature file format. "npy" or "hdf5" is supported.
 ###########################################################
 #              NETWORK ARCHITECTURE SETTING               #
 ###########################################################
-model_type: VTN
+model_type: FastSpeechVC
 model_params:
     idim: 80
     odim: 80
-    dprenet_layers: 2  # one more linear layer w/o non-linear will be added for 0_centor
-    dprenet_units: 256
-    adim: 384
-    aheads: 4
-    elayers: 6
-    eunits: 1536
-    dlayers: 6
-    dunits: 1536
-    postnet_layers: 5
-    postnet_filts: 5
-    postnet_chans: 256
-    use_batch_norm: True
-    encoder_normalize_before: True
-    decoder_normalize_before: False
-    encoder_concat_after: False
-    decoder_concat_after: False
-    decoder_reduction_factor: 4
+    adim: 384         # attention dimension
+    aheads: 2         # number of attention heads
+    elayers: 4        # number of encoder layers
+    eunits: 1536      # number of encoder ff units
+    dlayers: 4        # number of decoder layers
+    dunits: 1536      # number of decoder ff units
+    positionwise_layer_type: linear   # type of position-wise layer
+    positionwise_conv_kernel_size: 1  # kernel size of position wise conv layer
+    duration_predictor_layers: 2      # number of layers of duration predictor
+    duration_predictor_chans: 256     # number of channels of duration predictor
+    duration_predictor_kernel_size: 3 # filter size of duration predictor
+    postnet_layers: 5                 # number of layers of postnset
+    postnet_filts: 5                  # filter size of conv layers in postnet
+    postnet_chans: 256                # number of channels of conv layers in postnet
+    use_masking: True                 # whether to apply masking for padded part in loss calculation
+    encoder_normalize_before: True    # whether to perform layer normalization before the input
+    decoder_normalize_before: True    # whether to perform layer normalization before the input
+    encoder_reduction_factor: 1       # encoder reduction factor
+    decoder_reduction_factor: 1       # decoder reduction factor
+    encoder_type: conformer           # encoder type
+    decoder_type: conformer           # decoder type
+    encoder_input_layer: conv2d       # type of position-wise layer
+    conformer_pos_enc_layer_type: rel_pos        # conformer positional encoding type
+    conformer_self_attn_layer_type: rel_selfattn # conformer self-attention type
+    use_macaron_style_in_conformer: true         # whether to use macaron style in conformer
+    use_cnn_in_conformer: true                   # whether to use CNN in conformer
+    conformer_enc_kernel_size: 15                # kernel size in CNN module of conformer-based encoder
+    conformer_dec_kernel_size: 15                # kernel size in CNN module of conformer-based decoder
+    init_type: xavier_uniform                    # initialization type
+    transformer_enc_dropout_rate: 0.2            # dropout rate for transformer encoder layer
+    transformer_enc_positional_dropout_rate: 0.2 # dropout rate for transformer encoder positional encoding
+    transformer_enc_attn_dropout_rate: 0.2       # dropout rate for transformer encoder attention layer
+    transformer_dec_dropout_rate: 0.2            # dropout rate for transformer decoder layer
+    transformer_dec_positional_dropout_rate: 0.2 # dropout rate for transformer decoder positional encoding
+    transformer_dec_attn_dropout_rate: 0.2       # dropout rate for transformer decoder attention layer
 
 ###########################################################
 #                      LOSS SETTING                       #
 ###########################################################
-trainer_type: ARVCTrainer
-collater_type: ARVCCollater
+trainer_type: NARVCTrainer
+collater_type: NARVCCollater
 criterions:
-    "Seq2SeqLoss":
-        bce_pos_weight: 10.0
+    "L1Loss": {}
+    "DurationPredictorLoss": {}
 
 ###########################################################
 #                   INFERENCE SETTING                     #
 ###########################################################
 vocoder:
-    checkpoint: ./downloads/pwg_slt/checkpoint-400000steps.pkl
-    config: ./downloads/pwg_slt/config.yml
-    stats: ./downloads/pwg_slt/stats.h5
-inference:
-    threshold: 0.5    # threshold to stop the generation
-    maxlenratio: 6.0 # maximum length of generated samples = input length * maxlenratio
-    minlenratio: 0.0  # minimum length of generated samples = input length * minlenratio
+    checkpoint: ../vc1/downloads/pwg_slt/checkpoint-400000steps.pkl
+    config: ../vc1/downloads/pwg_slt/config.yml
+    stats: ../vc1/downloads/pwg_slt/stats.h5
+# inference:
 
 ###########################################################
 #                  DATA LOADER SETTING                    #
 ###########################################################
-batch_size: 100             # Batch size.
+batch_size: 16             # Batch size.
 pin_memory: true            # Whether to pin memory in Pytorch DataLoader.
 num_workers: 2              # Number of workers in Pytorch DataLoader.
 allow_cache: true           # Whether to allow cache in dataset. If true, it requires cpu memory.

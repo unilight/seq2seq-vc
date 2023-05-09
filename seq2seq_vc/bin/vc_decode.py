@@ -19,12 +19,13 @@ import yaml
 from tqdm import tqdm
 
 import seq2seq_vc.models
-from seq2seq_vc.datasets import SourceVCMelDataset
+from seq2seq_vc.datasets import ParallelVCMelDataset, SourceVCMelDataset
 from seq2seq_vc.utils import read_hdf5, write_hdf5
 from seq2seq_vc.utils.plot import plot_attention, plot_generated_and_ref_2d, plot_1d
 from seq2seq_vc.vocoder import Vocoder
 from seq2seq_vc.vocoder.s3prl_feat2wav import S3PRL_Feat2Wav
-
+from seq2seq_vc.utils.types import str2bool
+from seq2seq_vc.utils.duration_calculator import DurationCalculator
 
 def main():
     """Run decoding process."""
@@ -101,6 +102,21 @@ def main():
         default=1,
         help="logging level. higher is more logging. (default=1)",
     )
+    parser.add_argument(
+        "--use-teacher-forcing",
+        type=str2bool,
+        default=False,
+        help="Whether to use teacher forcing",
+    )
+    parser.add_argument(
+        "--trg-dumpdir",
+        default=None,
+        type=str,
+        help=(
+            "directory including feature files. "
+            "you need to specify either feats-scp or dumpdir."
+        ),
+    )
     args = parser.parse_args()
 
     # set logger
@@ -132,6 +148,7 @@ def main():
     with open(args.config) as f:
         config = yaml.load(f, Loader=yaml.Loader)
     config.update(vars(args))
+
     for key, value in config.items():
         logging.info(f"{key} = {value}")
 
@@ -151,12 +168,22 @@ def main():
     if args.dumpdir is not None:
         mel_query = "*.h5"
         mel_load_fn = lambda x: read_hdf5(x, args.src_feat_type)  # NOQA
-        dataset = SourceVCMelDataset(
-            src_root_dir=args.dumpdir,
-            mel_query=mel_query,
-            mel_load_fn=mel_load_fn,
-            return_utt_id=True,
-        )
+        if args.use_teacher_forcing:
+            dataset = ParallelVCMelDataset(
+                src_root_dir=args.dumpdir,
+                trg_root_dir=args.trg_dumpdir,
+                mel_query=mel_query,
+                src_load_fn=mel_load_fn,
+                trg_load_fn=mel_load_fn,
+                return_utt_id=True,
+            )
+        else:
+            dataset = SourceVCMelDataset(
+                src_root_dir=args.dumpdir,
+                mel_query=mel_query,
+                mel_load_fn=mel_load_fn,
+                return_utt_id=True,
+            )
     else:
         raise NotImplementedError
         dataset = MelSCPDataset(
@@ -177,6 +204,12 @@ def main():
     model.load_state_dict(torch.load(args.checkpoint, map_location="cpu")["model"])
     model = model.eval().to(device)
     logging.info(f"Loaded model parameters from {args.checkpoint}.")
+
+    # check autoregressive or non-autoregressive
+    if model_class in seq2seq_vc.models.AR_VC_MODELS:
+        ar = true
+    elif model_class in seq2seq_vc.models.NAR_VC_MODELS:
+        ar = False
 
     # load vocoder if provided
     if config.get("vocoder", False):
@@ -201,14 +234,41 @@ def main():
                 ],  # this is used to denormalized the converted features,
             )
 
+    # build duration calculator in teacher-forcing mode
+    if args.use_teacher_forcing:
+        duration_calculator = DurationCalculator()
+
     # start generation
     with torch.no_grad(), tqdm(dataset, desc="[decode]") as pbar:
-        for idx, (utt_id, x) in enumerate(pbar, 1):
-            x = torch.tensor(x, dtype=torch.float).to(device)
-
-            # actually decoding
+        for idx, batch in enumerate(pbar, 1):
             start_time = time.time()
-            outs, probs, att_ws = model.inference(x, config["inference"], spemb=None)
+
+            if ar:
+                if args.use_teacher_forcing:
+                    utt_id, x, y = batch
+                    x = torch.tensor(x, dtype=torch.float).to(device)
+                    y = torch.tensor(y, dtype=torch.float).to(device)
+                    xs, ys = x.unsqueeze(0), y.unsqueeze(0)
+                    ilens = x.new_tensor([xs.size(1)]).long()
+                    olens = y.new_tensor([ys.size(1)]).long()
+                    labels = ys.new_zeros(ys.size(0), ys.size(1))
+                    for i, l in enumerate(olens):
+                        labels[i, l - 1 :] = 1.0
+                    (outs, _, probs, _, _,_ , (att_ws, _, _), ) = model(xs, ilens, ys, labels, olens, None)
+                    outs = outs.squeeze(0)
+                    probs = probs.squeeze(0)
+                    att_ws = torch.cat(att_ws, dim=0)
+                else:
+                    utt_id, x = batch
+                    x = torch.tensor(x, dtype=torch.float).to(device)
+                    outs, probs, att_ws = model.inference(x, config["inference"], spemb=None)
+            else:
+                utt_id, x = batch
+                x = torch.tensor(x, dtype=torch.float).to(device)
+                outs, d_outs = model.inference(x)
+                duration = [str(d) for d in d_outs.cpu().numpy()]
+
+
             logging.info(
                 "inference speed = %.1f frames / sec."
                 % (int(outs.size(0)) / (time.time() - start_time))
@@ -220,14 +280,15 @@ def main():
                 config["outdir"] + f"/outs/{utt_id}.png",
                 origin="lower",
             )
-            plot_1d(
-                probs.cpu().numpy(),
-                config["outdir"] + f"/probs/{utt_id}_prob.png",
-            )
-            plot_attention(
-                att_ws.cpu().numpy(),
-                config["outdir"] + f"/att_ws/{utt_id}_att_ws.png",
-            )
+            if ar:
+                plot_1d(
+                    probs.cpu().numpy(),
+                    config["outdir"] + f"/probs/{utt_id}_prob.png",
+                )
+                plot_attention(
+                    att_ws.cpu().numpy(),
+                    config["outdir"] + f"/att_ws/{utt_id}_att_ws.png",
+                )
 
             # write feats
             if not os.path.exists(os.path.join(config["outdir"], args.trg_feat_type)):
@@ -254,6 +315,23 @@ def main():
                     sr,
                     "PCM_16",
                 )
+
+            if (ar and args.use_teacher_forcing):
+                # generate durations from att_ws
+                duration, focus_rate = duration_calculator(att_ws)
+                logging.info(f"focus rate = {focus_rate:.3f}")
+                duration = duration * config["model_params"]["decoder_reduction_factor"]
+                duration = [str(d) for d in duration.cpu().numpy()]
+
+            if (ar and args.use_teacher_forcing) or (not ar):
+                # write durations
+                if not os.path.exists(os.path.join(config["outdir"], "durations")):
+                    os.makedirs(
+                        os.path.join(config["outdir"], "durations"), exist_ok=True
+                    )
+                
+                with open(os.path.join(config["outdir"], "durations", utt_id + ".txt"), "w") as f:
+                    f.write(" ".join(duration))
 
 
 if __name__ == "__main__":

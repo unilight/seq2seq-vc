@@ -17,13 +17,39 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-class ARTTSTrainer(Trainer):
-    """Customized trainer module for autoregressive TTS training."""
+class ARVCTrainer(Trainer):
+    """Customized trainer module for autoregressive VC training."""
 
-    def __init__(self) -> None:
-        super().__init__()
+    def load_trained_modules(self, checkpoint_path, init_mods):
+        if self.config["distributed"]:
+            main_state_dict = self.model.module.state_dict()
+        else:
+            main_state_dict = self.model.state_dict()
+
+        if os.path.isfile(checkpoint_path):
+            model_state_dict = torch.load(checkpoint_path, map_location="cpu")["model"]
+
+            # first make sure that all modules in `init_mods` are in `checkpoint_path`
+            modules = filter_modules(model_state_dict, init_mods)
+
+            # then, actually get the partial state_dict
+            partial_state_dict = get_partial_state_dict(model_state_dict, modules)
+
+            if partial_state_dict:
+                if transfer_verification(main_state_dict, partial_state_dict, modules):
+                    print_new_keys(partial_state_dict, modules, checkpoint_path)
+                    main_state_dict.update(partial_state_dict)
+        else:
+            logging.error(f"Specified model was not found: {checkpoint_path}")
+            exit(1)
+
+        if self.config["distributed"]:
+            self.model.module.load_state_dict(main_state_dict)
+        else:
+            self.model.load_state_dict(main_state_dict)
 
     def _train_step(self, batch):
+        """Train model one step."""
         # parse batch
         xs, ilens, ys, labels, olens, spembs = tuple(
             [_.to(self.device) if _ is not None else _ for _ in batch]
@@ -41,7 +67,7 @@ class ARTTSTrainer(Trainer):
         ) = self.model(xs, ilens, ys, labels, olens, spembs)
 
         # seq2seq loss
-        l1_loss, bce_loss = self.criterion["seq2seq"](
+        l1_loss, bce_loss = self.criterion["Seq2SeqLoss"](
             after_outs, before_outs, logits, ys_, labels_, olens_
         )
         gen_loss = l1_loss + bce_loss
@@ -49,7 +75,7 @@ class ARTTSTrainer(Trainer):
         self.total_train_loss["train/bce_loss"] += bce_loss.item()
 
         # guided attention loss
-        if self.config["use_guided_attn_loss"]:
+        if self.config.get("use_guided_attn_loss", False):
             ga_loss = self.criterion["guided_attn"](att_ws, ilens_ds_st, olens_in)
             gen_loss += ga_loss
             self.total_train_loss["train/guided_attn_loss"] += ga_loss.item()
@@ -71,7 +97,7 @@ class ARTTSTrainer(Trainer):
         self.steps += 1
         self.tqdm.update(1)
         self._check_train_finish()
-    
+
     @torch.no_grad()
     def _genearete_and_save_intermediate_result(self, batch):
         """Generate and save intermediate result."""
@@ -139,14 +165,9 @@ class ARTTSTrainer(Trainer):
             spembs = [None] * len(xs)
         for idx, (x, y, olen, spemb) in enumerate(zip(xs, ys, olens, spembs)):
             start_time = time.time()
-            if self.config["distributed"]:
-                outs, probs, att_ws = self.model.module.inference(
-                    x, self.config["inference"], spemb=spemb
-                )
-            else:
-                outs, probs, att_ws = self.model.inference(
-                    x, self.config["inference"], spemb=spemb
-                )
+            outs, probs, att_ws = self.model.inference(
+                x, self.config["inference"], spemb=spemb
+            )
             logging.info(
                 "inference speed = %.1f frames / sec."
                 % (int(outs.size(0)) / (time.time() - start_time))
