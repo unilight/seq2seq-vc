@@ -11,11 +11,19 @@ import time
 import torch
 
 from seq2seq_vc.trainers.base import Trainer
+from seq2seq_vc.utils.model_io import (
+    filter_modules,
+    get_partial_state_dict,
+    transfer_verification,
+    print_new_keys,
+)
 
 # set to avoid matplotlib error in CLI environment
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
 
 class ARVCTrainer(Trainer):
     """Customized trainer module for autoregressive VC training."""
@@ -51,9 +59,14 @@ class ARVCTrainer(Trainer):
     def _train_step(self, batch):
         """Train model one step."""
         # parse batch
-        xs, ilens, ys, labels, olens, spembs = tuple(
-            [_.to(self.device) if _ is not None else _ for _ in batch]
-        )
+        # xs, ilens, ys, labels, olens, spembs = tuple(
+        # [_.to(self.device) if _ is not None else _ for _ in batch]
+        # )
+        xs = batch["xs"].to(self.device)
+        ys = batch["ys"].to(self.device)
+        ilens = batch["ilens"].to(self.device)
+        olens = batch["olens"].to(self.device)
+        labels = batch["labels"].to(self.device)
 
         # model forward
         (
@@ -64,7 +77,7 @@ class ARVCTrainer(Trainer):
             labels_,
             olens_,
             (att_ws, ilens_ds_st, olens_in),
-        ) = self.model(xs, ilens, ys, labels, olens, spembs)
+        ) = self.model(xs, ilens, ys, labels, olens)
 
         # seq2seq loss
         l1_loss, bce_loss = self.criterion["Seq2SeqLoss"](
@@ -158,11 +171,16 @@ class ARVCTrainer(Trainer):
             os.makedirs(dirname)
 
         # generate
-        xs, _, ys, _, olens, spembs = tuple(
-            [_.to(self.device) if _ is not None else _ for _ in batch]
-        )
-        if spembs is None:
-            spembs = [None] * len(xs)
+        # xs, _, ys, _, olens, spembs = tuple(
+        #     [_.to(self.device) if _ is not None else _ for _ in batch]
+        # )
+        xs = batch["xs"].to(self.device)
+        ys = batch["ys"].to(self.device)
+        ilens = batch["ilens"].to(self.device)
+        olens = batch["olens"].to(self.device)
+        labels = batch["labels"].to(self.device)
+        spembs = [None] * len(xs)
+
         for idx, (x, y, olen, spemb) in enumerate(zip(xs, ys, olens, spembs)):
             start_time = time.time()
             outs, probs, att_ws = self.model.inference(

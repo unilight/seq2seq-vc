@@ -7,6 +7,7 @@
 import numpy as np
 import torch
 
+
 class ARVCCollater(object):
     """Customized collater for Pytorch DataLoader in autoregressive VC training."""
 
@@ -45,7 +46,7 @@ class ARVCCollater(object):
 
             return pad
 
-        xs, ys = [b[0] for b in batch], [b[1] for b in batch]
+        xs, ys = [b["src_feat"] for b in batch], [b["trg_feat"] for b in batch]
 
         # get list of lengths (must be tensor for DataParallel)
         ilens = torch.from_numpy(np.array([x.shape[0] for x in xs])).long()
@@ -60,4 +61,13 @@ class ARVCCollater(object):
         for i, l in enumerate(olens):
             labels[i, l - 1 :] = 1.0
 
-        return xs, ilens, ys, labels, olens, None
+        items = {
+            "xs": xs,
+            "ilens": ilens,
+            "ys": ys,
+            "olens": olens,
+            "labels": labels,
+            "spembs": None,
+        }
+
+        return items

@@ -24,9 +24,14 @@ num_train=932
 stats_ext=h5
 norm_name=                  # used to specify normalized data.
                             # Ex: `judy` for normalization with pretrained model, `self` for self-normalization
+src_feat=ppg_sxliu
+trg_feat=mel
 
 # pretrained model related
-pretrained_model_checkpoint=downloads/pretrained_models/ljspeech/transformer_tts_aept/checkpoint-50000steps.pkl
+# pretrained_model_checkpoint=downloads/pretrained_models/ljspeech/transformer_tts_aept/checkpoint-50000steps.pkl # r2
+# pretrained_model_checkpoint=/data/group1/z44476r/Experiments/seq2seq-vc/egs/ljspeech/tts1/exp/tts_aept_phn_tacotron_r1_checkpoint-100000steps/checkpoint-50000steps.pkl # r1
+# pretrained_model_checkpoint=/data/group1/z44476r/Experiments/seq2seq-vc/egs/ljspeech/tts1/exp/tts_aept_phn_tacotron_r4_checkpoint-100000steps/checkpoint-50000steps.pkl # r4
+pretrained_model_checkpoint=
 
 # training related setting
 tag=""     # tag for directory to save model
@@ -52,14 +57,16 @@ elif [ ${norm_name} == "self" ]; then
         echo "You cannot specify pretrained_model_checkpoint and norm_name=self simultaneously."
         exit 1
     fi
-    stats="${dumpdir}/${trgspk}_train/stats.${stats_ext}"
+    src_stats="${dumpdir}/${srcspk}_train_${num_train}/stats.${stats_ext}"
+    trg_stats="${dumpdir}/${trgspk}_train_${num_train}/stats.${stats_ext}"
 else
     if [ -z ${pretrained_model_checkpoint} ]; then
         echo "Please specify the pretrained model checkpoint."
         exit 1
     fi
     pretrained_model_dir="$(dirname ${pretrained_model_checkpoint})"
-    stats="${pretrained_model_dir}/stats.${stats_ext}"
+    src_stats="${pretrained_model_dir}/stats.${stats_ext}"
+    trg_stats="${pretrained_model_dir}/stats.${stats_ext}"
 fi
 
 if [ ${stage} -le -1 ] && [ ${stop_stage} -ge -1 ]; then
@@ -126,21 +133,28 @@ if [ "${stage}" -le 2 ] && [ "${stop_stage}" -ge 2 ]; then
 
     if [ ${norm_name} == "self" ]; then
         # calculate statistics for normalization
-        for name in "${srcspk}_train_${num_train}" "${trgspk}_train_${num_train}"; do
-        (
-            echo "Statistics computation start. See the progress via ${dumpdir}/${name}/compute_statistics.log."
-            ${train_cmd} "${dumpdir}/${name}/compute_statistics.log" \
-                compute_statistics.py \
-                    --config "${conf}" \
-                    --rootdir "${dumpdir}/${name}/raw" \
-                    --dumpdir "${dumpdir}/${name}" \
-                    --verbose "${verbose}"
-        ) &
-        pids+=($!)
-        done
-        i=0; for pid in "${pids[@]}"; do wait "${pid}" || ((++i)); done
-        [ "${i}" -gt 0 ] && echo "$0: ${i} background jobs are failed." && exit 1;
-        echo "Successfully finished calculation of statistics."
+
+        # src
+        name="${srcspk}_train_${num_train}"
+        echo "Statistics computation start. See the progress via ${dumpdir}/${name}/compute_statistics_${src_feat}.log."
+        ${train_cmd} "${dumpdir}/${name}/compute_statistics_${src_feat}.log" \
+            compute_statistics.py \
+                --config "${conf}" \
+                --rootdir "${dumpdir}/${name}/raw" \
+                --dumpdir "${dumpdir}/${name}" \
+                --feat_type "${src_feat}" \
+                --verbose "${verbose}"
+
+        # trg
+        name="${trgspk}_train_${num_train}"
+        echo "Statistics computation start. See the progress via ${dumpdir}/${name}/compute_statistics_${trg_feat}.log."
+        ${train_cmd} "${dumpdir}/${name}/compute_statistics_${trg_feat}.log" \
+            compute_statistics.py \
+                --config "${conf}" \
+                --rootdir "${dumpdir}/${name}/raw" \
+                --dumpdir "${dumpdir}/${name}" \
+                --feat_type "${trg_feat}" \
+                --verbose "${verbose}"
     fi
 
     # if norm_name=self, then use $conf; else use config in pretrained_model_dir
@@ -151,28 +165,52 @@ if [ "${stage}" -le 2 ] && [ "${stop_stage}" -ge 2 ]; then
     fi
 
     # normalize and dump them
-    for spk in ${srcspk} ${trgspk}; do
-        pids=()
-        for name in "${spk}_train_${num_train}" "${spk}_dev" "${spk}_eval"; do
-        (
-            [ ! -e "${dumpdir}/${name}/norm_${norm_name}" ] && mkdir -p "${dumpdir}/${name}/norm_${norm_name}"
-            echo "Nomalization start. See the progress via ${dumpdir}/${name}/norm_${norm_name}/normalize.*.log."
-            ${train_cmd} JOB=1:${n_jobs} "${dumpdir}/${name}/norm_${norm_name}/normalize.JOB.log" \
-                normalize.py \
-                    --config "${config_for_feature_extraction}" \
-                    --stats "${stats}" \
-                    --rootdir "${dumpdir}/${name}/raw/dump.JOB" \
-                    --dumpdir "${dumpdir}/${name}/norm_${norm_name}/dump.JOB" \
-                    --verbose "${verbose}" \
-                    --skip-wav-copy
-            echo "Successfully finished normalization of ${name} set."
-        ) &
-        pids+=($!)
-        done
-        i=0; for pid in "${pids[@]}"; do wait "${pid}" || ((++i)); done
-        [ "${i}" -gt 0 ] && echo "$0: ${i} background jobs are failed." && exit 1;
-        echo "Successfully finished ${spk} side normalization."
+    # src
+    spk="${srcspk}"
+    for name in "${spk}_train_${num_train}" "${spk}_dev" "${spk}_eval"; do
+    (
+        [ ! -e "${dumpdir}/${name}/norm_${norm_name}" ] && mkdir -p "${dumpdir}/${name}/norm_${norm_name}"
+        echo "Nomalization start. See the progress via ${dumpdir}/${name}/norm_${norm_name}/normalize_${src_feat}.*.log."
+        ${train_cmd} JOB=1:${n_jobs} "${dumpdir}/${name}/norm_${norm_name}/normalize_${src_feat}.JOB.log" \
+            normalize.py \
+                --config "${config_for_feature_extraction}" \
+                --stats "${src_stats}" \
+                --rootdir "${dumpdir}/${name}/raw/dump.JOB" \
+                --dumpdir "${dumpdir}/${name}/norm_${norm_name}/dump.JOB" \
+                --verbose "${verbose}" \
+                --feat_type "${src_feat}" \
+                --skip-wav-copy
+        echo "Successfully finished normalization of ${name} set."
+    ) &
+    pids+=($!)
     done
+    i=0; for pid in "${pids[@]}"; do wait "${pid}" || ((++i)); done
+    [ "${i}" -gt 0 ] && echo "$0: ${i} background jobs are failed." && exit 1;
+    echo "Successfully finished ${spk} side normalization."
+
+    # trg
+    spk="${trgspk}"
+    for name in "${spk}_train_${num_train}" "${spk}_dev" "${spk}_eval"; do
+    (
+        [ ! -e "${dumpdir}/${name}/norm_${norm_name}" ] && mkdir -p "${dumpdir}/${name}/norm_${norm_name}"
+        echo "Nomalization start. See the progress via ${dumpdir}/${name}/norm_${norm_name}/normalize_${trg_feat}.*.log."
+        ${train_cmd} JOB=1:${n_jobs} "${dumpdir}/${name}/norm_${norm_name}/normalize_${trg_feat}.JOB.log" \
+            normalize.py \
+                --config "${config_for_feature_extraction}" \
+                --stats "${trg_stats}" \
+                --rootdir "${dumpdir}/${name}/raw/dump.JOB" \
+                --dumpdir "${dumpdir}/${name}/norm_${norm_name}/dump.JOB" \
+                --verbose "${verbose}" \
+                --feat_type "${trg_feat}" \
+                --skip-wav-copy
+        echo "Successfully finished normalization of ${name} set."
+    ) &
+    pids+=($!)
+    done
+    i=0; for pid in "${pids[@]}"; do wait "${pid}" || ((++i)); done
+    [ "${i}" -gt 0 ] && echo "$0: ${i} background jobs are failed." && exit 1;
+    echo "Successfully finished ${spk} side normalization."
+
 fi
 
 
@@ -210,15 +248,17 @@ if [ "${stage}" -le 3 ] && [ "${stop_stage}" -ge 3 ]; then
                 --resume "${resume}" \
                 --verbose "${verbose}"
     else
-        cp "${dumpdir}/${trgspk}_train_${num_train}/stats.${stats_ext}" "${expdir}/"
+        cp "${trg_stats}" "${expdir}/"
         echo "Training start. See the progress via ${expdir}/train.log."
         ${cuda_cmd} --gpu "${n_gpus}" "${expdir}/train.log" \
             vc_train.py \
                 --config "${conf}" \
                 --src-train-dumpdir "${dumpdir}/${srcspk}_train_${num_train}/norm_${norm_name}" \
                 --src-dev-dumpdir "${dumpdir}/${srcspk}_dev/norm_${norm_name}" \
+                --src-feat-type "${src_feat}" \
                 --trg-train-dumpdir "${dumpdir}/${trgspk}_train_${num_train}/norm_${norm_name}" \
                 --trg-dev-dumpdir "${dumpdir}/${trgspk}_dev/norm_${norm_name}" \
+                --trg-feat-type "${trg_feat}" \
                 --trg-stats "${expdir}/stats.${stats_ext}" \
                 --outdir "${expdir}" \
                 --resume "${resume}" \
@@ -242,6 +282,8 @@ if [ "${stage}" -le 4 ] && [ "${stop_stage}" -ge 4 ]; then
             vc_decode.py \
                 --dumpdir "${dumpdir}/${name}/norm_${norm_name}/dump.JOB" \
                 --checkpoint "${checkpoint}" \
+                --src-feat-type "${src_feat}" \
+                --trg-feat-type "${trg_feat}" \
                 --trg-stats "${expdir}/stats.${stats_ext}" \
                 --outdir "${outdir}/${name}/out.JOB" \
                 --verbose "${verbose}"

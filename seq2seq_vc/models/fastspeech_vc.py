@@ -1,5 +1,8 @@
 import logging
 import torch
+import torch.nn.functional as F
+
+from typing import Literal
 
 from seq2seq_vc.layers.positional_encoding import ScaledPositionalEncoding
 from seq2seq_vc.modules.transformer.encoder import Encoder as TransformerEncoder
@@ -11,6 +14,8 @@ from seq2seq_vc.layers.utils import make_pad_mask, make_non_pad_mask
 from seq2seq_vc.modules.transformer.attention import MultiHeadedAttention
 from seq2seq_vc.modules.duration_predictor import DurationPredictor
 from seq2seq_vc.modules.length_regulator import LengthRegulator
+
+from seq2seq_vc.modules.transformer.subsampling import Conv2dSubsampling
 
 
 class FastSpeechVC(torch.nn.Module):
@@ -37,9 +42,12 @@ class FastSpeechVC(torch.nn.Module):
         decoder_normalize_before: bool = False,
         encoder_concat_after: bool = False,
         decoder_concat_after: bool = False,
+        duration_predictor_use_encoder_outputs: bool = True,
+        duration_predictor_input_dim: int = None,
         duration_predictor_layers: int = 2,
         duration_predictor_chans: int = 384,
         duration_predictor_kernel_size: int = 3,
+        # duration_predictor_scale_ratio: float = 1,
         encoder_reduction_factor: int = 1,
         decoder_reduction_factor: int = 1,
         encoder_type: str = "transformer",
@@ -69,7 +77,7 @@ class FastSpeechVC(torch.nn.Module):
         use_masking: bool = False,
         use_weighted_masking: bool = False,
         # teacher model related
-        # teacher_model_decoder_reduction_factor: int = 1,
+        teacher_model_decoder_reduction_factor: int = 4,
     ):
         # initialize base classes
         torch.nn.Module.__init__(self)
@@ -86,7 +94,13 @@ class FastSpeechVC(torch.nn.Module):
         self.decoder_type = decoder_type
         self.use_scaled_pos_enc = use_scaled_pos_enc
         self.encoder_input_layer = encoder_input_layer
-        # self.teacher_model_decoder_reduction_factor = teacher_model_decoder_reduction_factor
+        self.teacher_model_decoder_reduction_factor = (
+            teacher_model_decoder_reduction_factor
+        )
+        self.duration_predictor_use_encoder_outputs = (
+            duration_predictor_use_encoder_outputs
+        )
+        # self.duration_predictor_scale_ratio = duration_predictor_scale_ratio
 
         # define encoder
         if encoder_type == "transformer":
@@ -134,7 +148,7 @@ class FastSpeechVC(torch.nn.Module):
                 self.projection = torch.nn.Linear(self.spk_embed_dim, adim)
             else:
                 self.projection = torch.nn.Linear(adim + self.spk_embed_dim, adim)
-        
+
         # define duration predictor
         self.duration_predictor = DurationPredictor(
             idim=adim,
@@ -143,10 +157,15 @@ class FastSpeechVC(torch.nn.Module):
             kernel_size=duration_predictor_kernel_size,
             dropout_rate=duration_predictor_dropout_rate,
         )
+        # define extra projection layer
+        if not self.duration_predictor_use_encoder_outputs:
+            self.duration_predictor_projection = Conv2dSubsampling(
+                duration_predictor_input_dim, adim, 0.0, use_pos_enc=False
+            )
 
         # define length regulator
         self.length_regulator = LengthRegulator()
-        
+
         # define decoder
         # NOTE: we use encoder as decoder
         # because fastspeech's decoder is the same as encoder
@@ -228,6 +247,8 @@ class FastSpeechVC(torch.nn.Module):
         ilens: torch.Tensor,
         olens: torch.Tensor = None,
         ds: torch.Tensor = None,
+        dp_inputs: torch.Tensor = None,
+        dplens: torch.Tensor = None,
         spembs: torch.Tensor = None,
         is_inference: bool = False,
         alpha: float = 1.0,
@@ -259,13 +280,38 @@ class FastSpeechVC(torch.nn.Module):
             hs = self._integrate_with_spk_embed(hs, spembs)
 
         # forward duration predictor and length regulator
-        d_masks = make_non_pad_mask(ilens).to(xs.device)
-        if is_inference:
-            d_outs = self.duration_predictor.inference(hs, d_masks)  # (B, Tmax)
-            hs = self.length_regulator(hs, d_outs, alpha)  # (B, Lmax, adim)
+        if self.duration_predictor_use_encoder_outputs:
+            _dp_inputs = hs
         else:
-            d_outs = self.duration_predictor(hs, d_masks)  # (B, Tmax)
-            hs = self.length_regulator(hs, ds)  # (B, Lmax, adim)
+            _dp_inputs, _ = self.duration_predictor_projection(dp_inputs, None)
+
+            # interpolate
+            B, _, C = _dp_inputs.shape
+            _dp_inputs_interpolated = torch.zeros(
+                B, hs.shape[1], C, device=_dp_inputs.device
+            )
+            for i in range(_dp_inputs.shape[0]):
+                elem = _dp_inputs[i].unsqueeze(0).permute(0, 2, 1)  # [1, C, T]
+                _elem = (
+                    F.interpolate(elem, size=hs[i].shape[0]).permute(0, 2, 1).squeeze(0)
+                )
+                _dp_inputs_interpolated[i] = _elem
+            _dp_inputs = _dp_inputs_interpolated
+
+        if is_inference:
+            d_outs = self.duration_predictor.inference(_dp_inputs)  # (B, Tmax)
+            hs = self.length_regulator(
+                hs, d_outs * self.teacher_model_decoder_reduction_factor, alpha
+            )  # (B, Lmax, adim)
+        else:
+            # d_masks = make_non_pad_mask(dplens).to(xs.device)
+            d_masks = make_non_pad_mask(ilens).to(
+                xs.device
+            )  # because always same length as input
+            d_outs = self.duration_predictor(_dp_inputs, d_masks)  # (B, Tmax)
+            hs = self.length_regulator(
+                hs, ds * self.teacher_model_decoder_reduction_factor
+            )  # (B, Lmax, adim)
 
         # forward decoder
         if olens is not None and not is_inference:
@@ -275,12 +321,11 @@ class FastSpeechVC(torch.nn.Module):
                 )
             else:
                 olens_in = olens
+            # olens_in *= self.teacher_model_decoder_reduction_factor
             h_masks = self._source_mask(olens_in)
         else:
             h_masks = None
-        # print("hs", hs.shape)
-        # print("h_masks", h_masks.shape)
-        
+
         zs, _ = self.decoder(hs, h_masks)  # (B, Lmax, adim)
         before_outs = self.feat_out(zs).view(
             zs.size(0), -1, self.odim
@@ -304,6 +349,8 @@ class FastSpeechVC(torch.nn.Module):
         tgt_speech_lengths: torch.Tensor,
         durations: torch.Tensor,
         durations_lengths: torch.Tensor,
+        dp_inputs: torch.Tensor = None,
+        dp_lengths: torch.Tensor = None,
         spembs: torch.Tensor = None,
     ):
         """Calculate forward propagation.
@@ -334,12 +381,19 @@ class FastSpeechVC(torch.nn.Module):
 
         # forward propagation
         before_outs, after_outs, d_outs, ilens_ = self._forward(
-            xs, ilens, olens, ds, spembs=spembs, is_inference=False
+            xs,
+            ilens,
+            olens,
+            ds,
+            dp_inputs=dp_inputs,
+            dplens=dp_lengths,
+            spembs=spembs,
+            is_inference=False,
         )
 
         # modifiy mod part of groundtruth
         # if self.encoder_reduction_factor > 1:
-            # ilens = ilens.new([ilen // self.encoder_reduction_factor for ilen in ilens])
+        # ilens = ilens.new([ilen // self.encoder_reduction_factor for ilen in ilens])
         if self.decoder_reduction_factor > 1:
             olens = olens.new(
                 [olen - olen % self.decoder_reduction_factor for olen in olens]
@@ -355,6 +409,7 @@ class FastSpeechVC(torch.nn.Module):
         tgt_speech: torch.Tensor = None,
         spembs: torch.Tensor = None,
         durations: torch.Tensor = None,
+        dp_input: torch.Tensor = None,
         alpha: float = 1.0,
         use_teacher_forcing: bool = False,
     ):
@@ -381,6 +436,7 @@ class FastSpeechVC(torch.nn.Module):
         # setup batch axis
         ilens = torch.tensor([x.shape[0]], dtype=torch.long, device=x.device)
         xs, ys = x.unsqueeze(0), None
+        dp_input = dp_input.unsqueeze(0)
         if y is not None:
             ys = y.unsqueeze(0)
         if spemb is not None:
@@ -394,6 +450,7 @@ class FastSpeechVC(torch.nn.Module):
                 ilens,
                 ds=ds,
                 spembs=spembs,
+                dp_inputs=dp_input,
             )  # (1, L, odim)
         else:
             # inference
@@ -401,6 +458,7 @@ class FastSpeechVC(torch.nn.Module):
                 xs,
                 ilens,
                 spembs=spembs,
+                dp_inputs=dp_input,
                 is_inference=True,
                 alpha=alpha,
             )  # (1, L, odim)

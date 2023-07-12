@@ -10,6 +10,7 @@ import logging
 
 import torch
 
+
 def pad_list(xs, pad_value):
     """Perform padding for the list of tensors.
 

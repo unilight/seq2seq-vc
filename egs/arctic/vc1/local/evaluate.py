@@ -12,6 +12,7 @@ import numpy as np
 import librosa
 
 import torch
+import torchaudio
 from tqdm import tqdm
 import yaml
 
@@ -67,7 +68,8 @@ def _calculate_mcd_f0(file_list, gt_root, trgspk, f0min, f0max, results):
         # read both converted and ground truth wav
         cvt_wav, cvt_fs = librosa.load(cvt_wav_path, sr=None)
         gt_wav, gt_fs = librosa.load(gt_wav_path, sr=None)
-        assert cvt_fs == gt_fs
+        if cvt_fs != gt_fs:
+            cvt_wav = torchaudio.transforms.Resample(cvt_fs, gt_fs)(torch.from_numpy(cvt_wav)).numpy()
 
         # calculate MCD, F0RMSE, F0CORR and DDUR
         mcd, f0rmse, f0corr, ddur = calculate_mcd_f0(cvt_wav, gt_wav, gt_fs, f0min, f0max)

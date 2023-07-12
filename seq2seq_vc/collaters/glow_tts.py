@@ -7,6 +7,7 @@
 import numpy as np
 import torch
 
+
 class GlowTTSCollater(object):
     """Customized collater for Pytorch DataLoader in training."""
 

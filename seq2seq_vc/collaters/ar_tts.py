@@ -7,6 +7,7 @@
 import numpy as np
 import torch
 
+
 class ARTTSCollater(object):
     """Customized collater for Pytorch DataLoader in training."""
 

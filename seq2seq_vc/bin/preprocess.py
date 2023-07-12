@@ -13,12 +13,18 @@ import os
 import librosa
 import numpy as np
 import soundfile as sf
+
 import yaml
 
 from tqdm import tqdm
 
 from seq2seq_vc.datasets import AudioSCPDataset
 from seq2seq_vc.utils import write_hdf5
+
+import torch
+from s3prl.nn import Featurizer
+import s3prl_vc.models
+from s3prl_vc.upstream.interface import get_upstream
 
 
 def logmelfilterbank(
@@ -164,6 +170,32 @@ def main():
     if not os.path.exists(args.dumpdir):
         os.makedirs(args.dumpdir, exist_ok=True)
 
+    # load upstream extractor
+    device = torch.device("cpu")
+    extractors = {}
+    for feat_type in config.get("feat_list", ["mel"]):
+        if feat_type == "mel":
+            extractor = {}
+        elif feat_type == "encodec":
+            from seq2seq_vc.utils.encodec import get_encodec_model, encodec_encode
+            from encodec.utils import convert_audio
+
+            extractor = {"model": get_encodec_model()}
+        else:
+            checkpoint = config["feat_list"][feat_type]["checkpoint"]
+            upstream_model = get_upstream(feat_type).to(device)
+            upstream_model.eval()
+            upstream_featurizer = Featurizer(upstream_model).to(device)
+            upstream_featurizer.load_state_dict(
+                torch.load(checkpoint, map_location="cpu")["featurizer"]
+            )
+            upstream_featurizer.eval()
+            logging.info(f"Loaded {feat_type} extractor parameters from {checkpoint}.")
+
+            extractor = {"model": upstream_model, "featurizer": upstream_featurizer}
+
+        extractors[feat_type] = extractor
+
     # process each data
     for utt_id, (audio, fs) in tqdm(dataset):
         # check
@@ -209,25 +241,10 @@ def main():
             )
             hop_size = config["hop_size"] * config["sampling_rate_for_feats"] // fs
 
-        # extract feature
-        mel = logmelfilterbank(
-            x,
-            sampling_rate=sampling_rate,
-            hop_size=hop_size,
-            fft_size=config["fft_size"],
-            win_length=config["win_length"],
-            window=config["window"],
-            num_mels=config["num_mels"],
-            fmin=config["fmin"],
-            fmax=config["fmax"],
-            # keep compatibility
-            log_base=config.get("log_base", 10.0),
-        )
-
         # make sure the audio length and feature length are matched
         audio = np.pad(audio, (0, config["fft_size"]), mode="reflect")
-        audio = audio[: len(mel) * config["hop_size"]]
-        assert len(mel) * config["hop_size"] == len(audio)
+        # audio = audio[: len(mel) * config["hop_size"]]
+        # assert len(mel) * config["hop_size"] == len(audio)
 
         # apply global gain
         if config["global_gain_scale"] > 0.0:
@@ -239,31 +256,58 @@ def main():
             )
             continue
 
-        # save
+        # save waveform
         if config["format"] == "hdf5":
             write_hdf5(
                 os.path.join(args.dumpdir, f"{utt_id}.h5"),
                 "wave",
                 audio.astype(np.float32),
             )
+        else:
+            raise ValueError("support only hdf5 format.")
+
+        # extract and save feature
+        for feat_type in extractors:
+            if feat_type == "mel":
+                feat = logmelfilterbank(
+                    x,
+                    sampling_rate=sampling_rate,
+                    hop_size=hop_size,
+                    fft_size=config["fft_size"],
+                    win_length=config["win_length"],
+                    window=config["window"],
+                    num_mels=config["num_mels"],
+                    fmin=config["fmin"],
+                    fmax=config["fmax"],
+                    # keep compatibility
+                    log_base=config.get("log_base", 10.0),
+                )  # [n_frames, n_dim]
+            elif feat_type == "encodec":
+                encodec_model = extractors[feat_type]["model"]
+                audio_for_encodec = convert_audio(
+                    torch.from_numpy(x).unsqueeze(0),
+                    sampling_rate,
+                    encodec_model.sample_rate,
+                    encodec_model.channels,
+                )
+                feat = encodec_encode(
+                    audio_for_encodec, encodec_model
+                )  # a list of [1, 128, T]
+                feat = torch.concat(feat, dim=2).squeeze(0).numpy().T  # [T, 128]
+            else:
+                with torch.no_grad():
+                    xs = torch.from_numpy(x).unsqueeze(0).float().to(device)
+                    ilens = torch.LongTensor([x.shape[0]]).to(device)
+
+                    all_hs, all_hlens = extractors[feat_type]["model"](xs, ilens)
+                    hs, _ = extractors[feat_type]["featurizer"](all_hs, all_hlens)
+                    feat = hs[0].cpu().numpy()
+
             write_hdf5(
                 os.path.join(args.dumpdir, f"{utt_id}.h5"),
-                "feats",
-                mel.astype(np.float32),
+                feat_type,
+                feat.astype(np.float32),
             )
-        elif config["format"] == "npy":
-            np.save(
-                os.path.join(args.dumpdir, f"{utt_id}-wave.npy"),
-                audio.astype(np.float32),
-                allow_pickle=False,
-            )
-            np.save(
-                os.path.join(args.dumpdir, f"{utt_id}-feats.npy"),
-                mel.astype(np.float32),
-                allow_pickle=False,
-            )
-        else:
-            raise ValueError("support only hdf5 or npy format.")
 
 
 if __name__ == "__main__":

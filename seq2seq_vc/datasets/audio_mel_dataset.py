@@ -353,8 +353,12 @@ class ParallelVCMelDataset(Dataset):
         mel_query="*-feats.npy",
         src_load_fn=np.load,
         trg_load_fn=np.load,
+        dp_input_root_dir=None,
+        dp_input_query="*.h5",
+        dp_input_load_fn=np.load,
         durations_dir=None,
         duration_query="*.txt",
+        reduction_factor: int = 1,
         return_utt_id=False,
         allow_cache=False,
     ):
@@ -364,7 +368,10 @@ class ParallelVCMelDataset(Dataset):
             src_root_dir (str): Root directory including dumped files for the source.
             trg_root_dir (str): Root directory including dumped files for the target.
             mel_query (str): Query to find feature files in root_dir.
-            mel_load_fn (func): Function to load feature file.
+            src_load_fn (func): Function to load source feature files.
+            trg_load_fn (func): Function to load target feature files.
+            dp_input_root_dir (str): Root directory including dumped files for the dp input.
+            dp_input_load_fn (func): Function to load feature files for dp.
             durations_dir (str): Root directory including duration files.
             duration_query (str): Query to find duration files in src/trg_durations_dir.
             return_utt_id (bool): Whether to return the utterance id with arrays.
@@ -383,6 +390,7 @@ class ParallelVCMelDataset(Dataset):
         self.trg_mel_files = trg_mel_files
         self.src_load_fn = src_load_fn
         self.trg_load_fn = trg_load_fn
+        self.dp_input_load_fn = dp_input_load_fn
 
         # make sure the utt ids match
         src_utt_ids = sorted(
@@ -397,7 +405,7 @@ class ParallelVCMelDataset(Dataset):
         self.utt_ids = src_utt_ids
 
         # use map(list, zip(...)) to get list of list
-        self.mel_files = list(map(list, zip(self.src_mel_files, self.trg_mel_files))) 
+        self.mel_files = list(map(list, zip(self.src_mel_files, self.trg_mel_files)))
         self.return_utt_id = return_utt_id
         self.allow_cache = allow_cache
         if allow_cache:
@@ -406,12 +414,25 @@ class ParallelVCMelDataset(Dataset):
             self.caches = self.manager.list()
             self.caches += [() for _ in range(len(self.mel_files))]
 
-        # load duration files and zip with mel_files
-        if durations_dir is not None:
+        # load dp input feature files & duration files, and zip with mel_files
+        assert (dp_input_root_dir is not None and durations_dir is not None) or (
+            dp_input_root_dir is None and durations_dir is None
+        )
+        if durations_dir is not None and dp_input_root_dir is not None:
+            # find all dp input files
+            dp_input_feat_files = sorted(find_files(dp_input_root_dir, dp_input_query))
+            assert len(dp_input_feat_files) == len(self.mel_files)
+
+            # find all duration files
             duration_files = sorted(find_files(durations_dir, duration_query))
             assert len(duration_files) == len(self.mel_files)
-            self.mel_files = [v + [duration_files[i]] for i, v in enumerate(self.mel_files)]
+
+            self.mel_files = [
+                v + [dp_input_feat_files[i], duration_files[i]]
+                for i, v in enumerate(self.mel_files)
+            ]
             self.use_durations = True
+            self.reduction_factor = reduction_factor
         else:
             self.use_durations = False
 
@@ -433,22 +454,27 @@ class ParallelVCMelDataset(Dataset):
         src_mel = self.src_load_fn(self.mel_files[idx][0])
         trg_mel = self.trg_load_fn(self.mel_files[idx][1])
 
-        # read durations if exists
         if self.use_durations:
-            with open(self.mel_files[idx][2], "r") as f:
+            # read dp input feat
+            dp_input = self.dp_input_load_fn(self.mel_files[idx][2])
+
+            # read durations if exists
+            with open(self.mel_files[idx][3], "r") as f:
                 lines = f.read().splitlines()
                 assert len(lines) == 1
                 durations = np.array([int(d) for d in lines[0].split(" ")])
 
             # force the target to have the same length as the duration sum
-            trg_mel = trg_mel[:np.sum(durations)]
+            total_length = np.sum(durations) * self.reduction_factor
+            trg_mel = trg_mel[:total_length]
 
-        items = [src_mel, trg_mel]
+        items = {"src_feat": src_mel, "trg_feat": trg_mel}
 
         if self.return_utt_id:
-            items = [utt_id] + items
+            items["utt_id"] = utt_id
         if self.use_durations:
-            items.append(durations)
+            items["dp_input"] = dp_input
+            items["duration"] = durations
 
         if self.allow_cache:
             self.caches[idx] = items
@@ -475,6 +501,9 @@ class SourceVCMelDataset(Dataset):
         src_root_dir,
         mel_query="*-feats.npy",
         mel_load_fn=np.load,
+        dp_input_root_dir=None,
+        dp_input_query="*.h5",
+        dp_input_load_fn=np.load,
         return_utt_id=False,
         allow_cache=False,
     ):
@@ -497,6 +526,7 @@ class SourceVCMelDataset(Dataset):
         ), f"Not found any mel files in ${src_root_dir}."
 
         self.mel_load_fn = mel_load_fn
+        self.dp_input_load_fn = dp_input_load_fn
         self.utt_ids = [
             os.path.splitext(os.path.basename(f))[0] for f in self.src_mel_files
         ]
@@ -507,6 +537,20 @@ class SourceVCMelDataset(Dataset):
             self.manager = Manager()
             self.caches = self.manager.list()
             self.caches += [() for _ in range(len(self.src_mel_files))]
+
+        if dp_input_root_dir is not None:
+            self.use_dp_input = True
+
+            # find all dp input files
+            dp_input_feat_files = sorted(find_files(dp_input_root_dir, dp_input_query))
+            assert len(dp_input_feat_files) == len(self.src_mel_files)
+
+            self.src_mel_files = [
+                [v] + [dp_input_feat_files[i]] for i, v in enumerate(self.src_mel_files)
+            ]
+        else:
+            self.src_mel_files = [[v] for v in self.src_mel_files]
+            self.use_dp_input = False
 
     def __getitem__(self, idx):
         """Get specified idx items.
@@ -523,12 +567,15 @@ class SourceVCMelDataset(Dataset):
             return self.caches[idx]
 
         utt_id = self.utt_ids[idx]
-        src_mel = self.mel_load_fn(self.src_mel_files[idx])
+        src_mel = self.mel_load_fn(self.src_mel_files[idx][0])
+
+        items = {"src_feat": src_mel}
 
         if self.return_utt_id:
-            items = utt_id, src_mel
-        else:
-            items = src_mel
+            items["utt_id"] = utt_id
+
+        if self.use_dp_input:
+            items["dp_input"] = self.dp_input_load_fn(self.src_mel_files[idx][1])
 
         if self.allow_cache:
             self.caches[idx] = items

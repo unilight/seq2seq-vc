@@ -24,8 +24,10 @@ from seq2seq_vc.utils import read_hdf5, write_hdf5
 from seq2seq_vc.utils.plot import plot_attention, plot_generated_and_ref_2d, plot_1d
 from seq2seq_vc.vocoder import Vocoder
 from seq2seq_vc.vocoder.s3prl_feat2wav import S3PRL_Feat2Wav
+from seq2seq_vc.vocoder.encodec import EnCodec_decoder
 from seq2seq_vc.utils.types import str2bool
 from seq2seq_vc.utils.duration_calculator import DurationCalculator
+
 
 def main():
     """Run decoding process."""
@@ -52,6 +54,12 @@ def main():
             "directory including feature files. "
             "you need to specify either feats-scp or dumpdir."
         ),
+    )
+    parser.add_argument(
+        "--dp_input_dumpdir",
+        default=None,
+        type=str,
+        help=("directory including duration predictor input feature files. "),
     )
     parser.add_argument(
         "--trg-stats",
@@ -154,8 +162,8 @@ def main():
 
     # load target stats for denormalization
     config["trg_stats"] = {
-        "mean": read_hdf5(args.trg_stats, "mean"),
-        "scale": read_hdf5(args.trg_stats, "scale"),
+        "mean": read_hdf5(args.trg_stats, f"{args.trg_feat_type}_mean"),
+        "scale": read_hdf5(args.trg_stats, f"{args.trg_feat_type}_scale"),
     }
 
     # check arguments
@@ -168,6 +176,9 @@ def main():
     if args.dumpdir is not None:
         mel_query = "*.h5"
         mel_load_fn = lambda x: read_hdf5(x, args.src_feat_type)  # NOQA
+        dp_input_load_fn = lambda x: read_hdf5(
+            x, config.get("duration_predictor_feat", "feats")
+        )  # NOQA
         if args.use_teacher_forcing:
             dataset = ParallelVCMelDataset(
                 src_root_dir=args.dumpdir,
@@ -175,6 +186,7 @@ def main():
                 mel_query=mel_query,
                 src_load_fn=mel_load_fn,
                 trg_load_fn=mel_load_fn,
+                dp_input_load_fn=dp_input_load_fn,
                 return_utt_id=True,
             )
         else:
@@ -182,6 +194,8 @@ def main():
                 src_root_dir=args.dumpdir,
                 mel_query=mel_query,
                 mel_load_fn=mel_load_fn,
+                dp_input_root_dir=args.dp_input_dumpdir,
+                dp_input_load_fn=dp_input_load_fn,
                 return_utt_id=True,
             )
     else:
@@ -207,17 +221,25 @@ def main():
 
     # check autoregressive or non-autoregressive
     if model_class in seq2seq_vc.models.AR_VC_MODELS:
-        ar = true
+        ar = True
     elif model_class in seq2seq_vc.models.NAR_VC_MODELS:
         ar = False
 
     # load vocoder if provided
     if config.get("vocoder", False):
-        if config["vocoder"].get("vocoder_type", "") == "s3prl_vc":
+        vocoder_type = config["vocoder"].get("vocoder_type", "")
+        if vocoder_type == "s3prl_vc":
             vocoder = S3PRL_Feat2Wav(
                 config["vocoder"]["checkpoint"],
                 config["vocoder"]["config"],
                 config["vocoder"]["stats"],
+                config[
+                    "trg_stats"
+                ],  # this is used to denormalized the converted features,
+                device,
+            )
+        elif vocoder_type == "encodec":
+            vocoder = EnCodec_decoder(
                 config[
                     "trg_stats"
                 ],  # this is used to denormalized the converted features,
@@ -245,7 +267,9 @@ def main():
 
             if ar:
                 if args.use_teacher_forcing:
-                    utt_id, x, y = batch
+                    utt_id = batch["utt_id"]
+                    x = batch["src_feat"]
+                    y = batch["trg_feat"]
                     x = torch.tensor(x, dtype=torch.float).to(device)
                     y = torch.tensor(y, dtype=torch.float).to(device)
                     xs, ys = x.unsqueeze(0), y.unsqueeze(0)
@@ -254,20 +278,33 @@ def main():
                     labels = ys.new_zeros(ys.size(0), ys.size(1))
                     for i, l in enumerate(olens):
                         labels[i, l - 1 :] = 1.0
-                    (outs, _, probs, _, _,_ , (att_ws, _, _), ) = model(xs, ilens, ys, labels, olens, None)
+                    (
+                        outs,
+                        _,
+                        probs,
+                        _,
+                        _,
+                        _,
+                        (att_ws, _, _),
+                    ) = model(xs, ilens, ys, labels, olens, None)
                     outs = outs.squeeze(0)
                     probs = probs.squeeze(0)
                     att_ws = torch.cat(att_ws, dim=0)
                 else:
-                    utt_id, x = batch
+                    utt_id = batch["utt_id"]
+                    x = batch["src_feat"]
                     x = torch.tensor(x, dtype=torch.float).to(device)
-                    outs, probs, att_ws = model.inference(x, config["inference"], spemb=None)
+                    outs, probs, att_ws = model.inference(
+                        x, config["inference"], spemb=None
+                    )
             else:
-                utt_id, x = batch
+                utt_id = batch["utt_id"]
+                x = batch["src_feat"]
+                dp_input = batch["dp_input"]
                 x = torch.tensor(x, dtype=torch.float).to(device)
-                outs, d_outs = model.inference(x)
+                dp_input = torch.tensor(dp_input, dtype=torch.float).to(device)
+                outs, d_outs = model.inference(x, dp_input=dp_input)
                 duration = [str(d) for d in d_outs.cpu().numpy()]
-
 
             logging.info(
                 "inference speed = %.1f frames / sec."
@@ -316,11 +353,10 @@ def main():
                     "PCM_16",
                 )
 
-            if (ar and args.use_teacher_forcing):
+            if ar and args.use_teacher_forcing:
                 # generate durations from att_ws
                 duration, focus_rate = duration_calculator(att_ws)
                 logging.info(f"focus rate = {focus_rate:.3f}")
-                duration = duration * config["model_params"]["decoder_reduction_factor"]
                 duration = [str(d) for d in duration.cpu().numpy()]
 
             if (ar and args.use_teacher_forcing) or (not ar):
@@ -329,8 +365,10 @@ def main():
                     os.makedirs(
                         os.path.join(config["outdir"], "durations"), exist_ok=True
                     )
-                
-                with open(os.path.join(config["outdir"], "durations", utt_id + ".txt"), "w") as f:
+
+                with open(
+                    os.path.join(config["outdir"], "durations", utt_id + ".txt"), "w"
+                ) as f:
                     f.write(" ".join(duration))
 
 

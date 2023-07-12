@@ -14,8 +14,10 @@ from seq2seq_vc.trainers.base import Trainer
 
 # set to avoid matplotlib error in CLI environment
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
 
 class NARVCTrainer(Trainer):
     """Customized trainer module for non-autoregressive VC training."""
@@ -51,25 +53,30 @@ class NARVCTrainer(Trainer):
     def _train_step(self, batch):
         """Train model one step."""
         # parse batch
-        xs, ilens, ys, olens, durations, duration_lens, spembs = tuple(
-            [_.to(self.device) if _ is not None else _ for _ in batch]
-        )
+        # xs, ilens, ys, olens, durations, duration_lens, spembs = tuple(
+        # [_.to(self.device) if _ is not None else _ for _ in batch]
+        # )
+        xs = batch["xs"].to(self.device)
+        ys = batch["ys"].to(self.device)
+        ilens = batch["ilens"].to(self.device)
+        olens = batch["olens"].to(self.device)
+        durations = batch["durations"].to(self.device)
+        duration_lens = batch["duration_lens"].to(self.device)
+        dp_inputs = batch["dp_inputs"].to(self.device)
+        dplens = batch["dplens"].to(self.device)
 
         # model forward
-        (
-            before_outs,
-            after_outs,
-            d_outs,
-            ilens_,
-            olens_,
-            ys_,
-        ) = self.model(xs, ilens, ys, olens, durations, duration_lens, spembs)
+        (before_outs, after_outs, d_outs, ilens_, olens_, ys_,) = self.model(
+            xs, ilens, ys, olens, durations, duration_lens, dp_inputs, dp_lengths=dplens
+        )
 
         # l1 loss
         l1_loss = self.criterion["L1Loss"](after_outs, before_outs, ys_, olens_)
 
         # duration prediction loss
-        duration_loss = self.criterion["DurationPredictorLoss"](d_outs, durations, ilens_)
+        duration_loss = self.criterion["DurationPredictorLoss"](
+            d_outs, durations, ilens_
+        )
 
         gen_loss = l1_loss + duration_loss
         self.total_train_loss["train/l1_loss"] += l1_loss.item()
@@ -153,16 +160,24 @@ class NARVCTrainer(Trainer):
             os.makedirs(dirname)
 
         # generate
-        xs, ilens, ys, olens, durations, duration_lens, spembs = tuple(
-            [_.to(self.device) if _ is not None else _ for _ in batch]
-        )
-        if spembs is None:
-            spembs = [None] * len(xs)
-        for idx, (x, y, olen, spemb) in enumerate(zip(xs, ys, olens, spembs)):
+        # xs, ilens, ys, olens, durations, duration_lens, spembs = tuple(
+        # [_.to(self.device) if _ is not None else _ for _ in batch]
+        # )
+        xs = batch["xs"].to(self.device)
+        ys = batch["ys"].to(self.device)
+        ilens = batch["ilens"].to(self.device)
+        olens = batch["olens"].to(self.device)
+        durations = batch["durations"].to(self.device)
+        duration_lens = batch["duration_lens"].to(self.device)
+        dp_inputs = batch["dp_inputs"].to(self.device)
+        dplens = batch["dplens"].to(self.device)
+        spembs = [None] * len(xs)
+
+        for idx, (x, y, olen, spemb, dp_input, dplen) in enumerate(
+            zip(xs, ys, olens, spembs, dp_inputs, dplens)
+        ):
             start_time = time.time()
-            outs = self.model.inference(
-                x, spembs=spemb
-            )
+            outs, d_outs = self.model.inference(x, spembs=spemb, dp_input=dp_input)
             logging.info(
                 "inference speed = %.1f frames / sec."
                 % (int(outs.size(0)) / (time.time() - start_time))

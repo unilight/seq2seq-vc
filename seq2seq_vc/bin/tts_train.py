@@ -29,13 +29,12 @@ from seq2seq_vc.utils import read_hdf5
 from seq2seq_vc.vocoder import Vocoder
 from seq2seq_vc.vocoder.s3prl_feat2wav import S3PRL_Feat2Wav
 from seq2seq_vc.vocoder.griffin_lim import Spectrogram2Waveform
+from seq2seq_vc.vocoder.encodec import EnCodec_decoder
 
 from seq2seq_vc.schedulers.warmup_lr import WarmupLR
 from torch.optim.lr_scheduler import ExponentialLR
-scheduler_classes = {
-    "warmuplr": WarmupLR,
-    "exponentiallr": ExponentialLR
-}
+
+scheduler_classes = {"warmuplr": WarmupLR, "exponentiallr": ExponentialLR}
 
 
 def main():
@@ -108,7 +107,7 @@ def main():
     parser.add_argument(
         "--feat-type",
         type=str,
-        default="feats",
+        default="mel",
         help=(
             "target feature type. this is used as key name to read h5 feature files. "
         ),
@@ -208,8 +207,8 @@ def main():
 
     # load target stats for denormalization
     config["stats"] = {
-        "mean": read_hdf5(args.stats, "mean"),
-        "scale": read_hdf5(args.stats, "scale"),
+        "mean": read_hdf5(args.stats, f"{args.feat_type}_mean"),
+        "scale": read_hdf5(args.stats, f"{args.feat_type}_scale"),
     }
 
     # write idim
@@ -320,11 +319,17 @@ def main():
 
     # load vocoder
     if config.get("vocoder", False):
-        if config["vocoder"].get("vocoder_type", "") == "s3prl_vc":
+        vocoder_type = config["vocoder"].get("vocoder_type", "")
+        if vocoder_type == "s3prl_vc":
             vocoder = S3PRL_Feat2Wav(
                 config["vocoder"]["checkpoint"],
                 config["vocoder"]["config"],
                 config["vocoder"]["stats"],
+                config["stats"],  # this is used to denormalized the converted features,
+                device,
+            )
+        elif vocoder_type == "encodec":
+            vocoder = EnCodec_decoder(
                 config["stats"],  # this is used to denormalized the converted features,
                 device,
             )
@@ -351,24 +356,15 @@ def main():
         )
 
     # define criterions
-    criterion = {
-        "seq2seq": Seq2SeqLoss(
-            # keep compatibility
-            **config.get("seq2seq_loss_params", {})
-        ).to(device)
-    }
-    if config.get("use_guided_attn_loss", False):  # keep compatibility
-        criterion["guided_attn"] = GuidedMultiHeadAttentionLoss(
-            # keep compatibility
-            **config.get("guided_attn_loss_params", {}),
-        ).to(device)
-    else:
-        config["use_guided_attn_loss"] = False
-    
     if config.get("criterions", None):
         criterion = {
-            criterion_name: getattr(seq2seq_vc.losses, criterion_class)() for criterion_name, criterion_class in config["criterions"].items()
+            criterion_class: getattr(seq2seq_vc.losses, criterion_class)(
+                **criterion_paramaters
+            )
+            for criterion_class, criterion_paramaters in config["criterions"].items()
         }
+    else:
+        raise ValueError("Please specify criterions in the config file.")
 
     # define optimizers and schedulers
     optimizer_class = getattr(

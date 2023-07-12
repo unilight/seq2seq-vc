@@ -6,6 +6,8 @@
 
 import numpy as np
 import torch
+import torch.nn.functional as F
+
 
 class NARVCCollater(object):
     """Customized collater for Pytorch DataLoader in non-autoregressive VC training."""
@@ -45,21 +47,45 @@ class NARVCCollater(object):
 
             return pad
 
-        xs, ys = [b[0] for b in batch], [b[1] for b in batch]
+        xs = []
+        ys = []
+        dp_inputs = []
+
+        for b in batch:
+            xs.append(b["src_feat"])
+            ys.append(b["trg_feat"])
+            dp_inputs.append(b["dp_input"])
 
         # get list of lengths (must be tensor for DataParallel)
         ilens = torch.from_numpy(np.array([x.shape[0] for x in xs])).long()
         olens = torch.from_numpy(np.array([y.shape[0] for y in ys])).long()
+        dplens = torch.from_numpy(np.array([dp.shape[0] for dp in dp_inputs])).long()
 
         # perform padding and conversion to tensor
         xs = pad_list([torch.from_numpy(x).float() for x in xs], 0)
         ys = pad_list([torch.from_numpy(y).float() for y in ys], 0)
+        dp_inputs = pad_list(
+            [torch.from_numpy(dp_input).float() for dp_input in dp_inputs], 0
+        )
+
+        items = {
+            "xs": xs,
+            "ilens": ilens,
+            "ys": ys,
+            "olens": olens,
+            "dp_inputs": dp_inputs,
+            "dplens": dplens,
+            "spembs": None,
+        }
 
         # get duration if exists
-        if len(batch[0]) > 2:
-            durations = [b[2] for b in batch]
+        if "duration" in batch[0]:
+            durations = [b["duration"] for b in batch]
             durations = pad_list([torch.from_numpy(d).long() for d in durations], 0)
-            duration_lens = torch.from_numpy(np.array([d.shape[0] for d in durations])).long()
-            return xs, ilens, ys, olens, durations, duration_lens, None
-        else:
-            return xs, ilens, ys, olens, None, None
+            duration_lens = torch.from_numpy(
+                np.array([d.shape[0] for d in durations])
+            ).long()
+            items["durations"] = durations
+            items["duration_lens"] = duration_lens
+
+        return items

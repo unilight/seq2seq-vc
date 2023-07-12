@@ -32,18 +32,11 @@ import seq2seq_vc.collaters
 
 from seq2seq_vc.datasets import ParallelVCMelDataset
 
-# from seq2seq_vc.losses import Seq2SeqLoss, GuidedMultiHeadAttentionLoss
 from seq2seq_vc.utils import read_hdf5
 from seq2seq_vc.vocoder import Vocoder
 from seq2seq_vc.vocoder.s3prl_feat2wav import S3PRL_Feat2Wav
 from seq2seq_vc.vocoder.griffin_lim import Spectrogram2Waveform
-from seq2seq_vc.utils.model_io import (
-    freeze_modules,
-    filter_modules,
-    get_partial_state_dict,
-    transfer_verification,
-    print_new_keys,
-)
+from seq2seq_vc.vocoder.encodec import EnCodec_decoder
 
 # set to avoid matplotlib error in CLI environment
 import matplotlib
@@ -107,6 +100,29 @@ def main():
             "target feature type. this is used as key name to read h5 feature files. "
         ),
     )
+    parser.add_argument(
+        "--train-dp-input-dir",
+        default=None,
+        type=str,
+        help=("directory including training duration predictor input feature files. "),
+    )
+    parser.add_argument(
+        "--dev-dp-input-dir",
+        default=None,
+        type=str,
+        help=(
+            "directory including development duration predictor input feature files. "
+        ),
+    )
+    # #(unilight)NOTE: the following is specified in the config?
+    # parser.add_argument(
+    #     "--dp-input-feat-type",
+    #     type=str,
+    #     default="feats",
+    #     help=(
+    #         "duration input feature type. this is used as key name to read h5 feature files. "
+    #     ),
+    # )
     parser.add_argument(
         "--train-duration-dir",
         default=None,
@@ -233,28 +249,32 @@ def main():
     # load target stats for denormalization
     if args.trg_stats is not None:
         config["trg_stats"] = {
-            "mean": read_hdf5(args.trg_stats, "mean"),
-            "scale": read_hdf5(args.trg_stats, "scale"),
+            "mean": read_hdf5(args.trg_stats, f"{args.trg_feat_type}_mean"),
+            "scale": read_hdf5(args.trg_stats, f"{args.trg_feat_type}_scale"),
         }
 
     # get dataset
     if config["format"] == "hdf5":
         mel_query = "*.h5"
+        dp_input_query = "*.h5"
         src_mel_load_fn = lambda x: read_hdf5(x, args.src_feat_type)  # NOQA
         trg_mel_load_fn = lambda x: read_hdf5(x, args.trg_feat_type)  # NOQA
-    elif config["format"] == "npy":
-        mel_query = "*-feats.npy"
-        src_mel_load_fn = np.load
-        trg_mel_load_fn = np.load
+        dp_input_load_fn = lambda x: read_hdf5(
+            x, config.get("duration_predictor_feat", "feats")
+        )  # NOQA
     else:
-        raise ValueError("support only hdf5 or npy format.")
+        raise ValueError("support only hdf5 format.")
     train_dataset = ParallelVCMelDataset(
         src_root_dir=args.src_train_dumpdir,
         trg_root_dir=args.trg_train_dumpdir,
         mel_query=mel_query,
         src_load_fn=src_mel_load_fn,
         trg_load_fn=trg_mel_load_fn,
+        dp_input_root_dir=args.train_dp_input_dir,
+        dp_input_query=dp_input_query,
+        dp_input_load_fn=dp_input_load_fn,
         durations_dir=args.train_duration_dir,
+        reduction_factor=config.get("teacher_duration_reduction_factor", 1),
         allow_cache=config.get("allow_cache", False),  # keep compatibility
     )
     logging.info(f"The number of training files = {len(train_dataset)}.")
@@ -264,7 +284,11 @@ def main():
         mel_query=mel_query,
         src_load_fn=src_mel_load_fn,
         trg_load_fn=trg_mel_load_fn,
+        dp_input_root_dir=args.dev_dp_input_dir,
+        dp_input_query=dp_input_query,
+        dp_input_load_fn=dp_input_load_fn,
         durations_dir=args.dev_duration_dir,
+        reduction_factor=config.get("teacher_duration_reduction_factor", 1),
         allow_cache=config.get("allow_cache", False),  # keep compatibility
     )
     logging.info(f"The number of development files = {len(dev_dataset)}.")
@@ -326,11 +350,19 @@ def main():
 
     # load vocoder
     if config.get("vocoder", False):
-        if config["vocoder"].get("vocoder_type", "") == "s3prl_vc":
+        vocoder_type = config["vocoder"].get("vocoder_type", "")
+        if vocoder_type == "s3prl_vc":
             vocoder = S3PRL_Feat2Wav(
                 config["vocoder"]["checkpoint"],
                 config["vocoder"]["config"],
                 config["vocoder"]["stats"],
+                config[
+                    "trg_stats"
+                ],  # this is used to denormalized the converted features,
+                device,
+            )
+        elif vocoder_type == "encodec":
+            vocoder = EnCodec_decoder(
                 config[
                     "trg_stats"
                 ],  # this is used to denormalized the converted features,
@@ -361,7 +393,9 @@ def main():
     # define criterions
     if config.get("criterions", None):
         criterion = {
-            criterion_class: getattr(seq2seq_vc.losses, criterion_class)(**criterion_paramaters)
+            criterion_class: getattr(seq2seq_vc.losses, criterion_class)(
+                **criterion_paramaters
+            )
             for criterion_class, criterion_paramaters in config["criterions"].items()
         }
     else:

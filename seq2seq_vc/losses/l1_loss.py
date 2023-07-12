@@ -1,6 +1,7 @@
 import torch
 from seq2seq_vc.layers.utils import make_non_pad_mask
 
+
 class L1Loss(torch.nn.Module):
     """L1 Loss function module (for feed-forward Transformer)"""
 

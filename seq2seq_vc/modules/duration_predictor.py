@@ -79,19 +79,8 @@ class DurationPredictor(torch.nn.Module):
                 torch.round(xs.exp() - self.offset), min=0
             ).long()  # avoid negative value
 
-            # print(torch.clamp(
-                # torch.round(xs.exp() - self.offset), min=0
-            # ).long().sum())
-
-            # xs = torch.clamp(xs.exp() - self.offset, min=0)
-            # print(xs)
-            # print(xs.sum())
-            # print(torch.floor(xs))
-            # print(torch.floor(xs).sum())
-
-
         # if x_masks is not None:
-            # xs = xs.masked_fill(x_masks, 0.0)
+        # xs = xs.masked_fill(x_masks, 0.0)
         if x_masks is not None:
             xs = xs * x_masks
 

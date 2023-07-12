@@ -12,6 +12,9 @@ from tqdm import tqdm
 import torch
 from tensorboardX import SummaryWriter
 
+from seq2seq_vc.utils.model_io import freeze_modules
+
+
 class Trainer(object):
     """Customized trainer module for VC/TTS training."""
 
@@ -210,3 +213,6 @@ class Trainer(object):
     def _check_train_finish(self):
         if self.steps >= self.config["train_max_steps"]:
             self.finish_train = True
+
+    def freeze_modules(self, modules):
+        freeze_modules(self.model, modules)

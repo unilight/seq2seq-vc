@@ -20,8 +20,10 @@ import numpy as np
 import torch
 import yaml
 
+
 def get_basename(path):
     return os.path.splitext(os.path.split(path)[-1])[0]
+
 
 def find_files(root_dir, query="*.wav", include_root_dir=True):
     """Find files recursively.

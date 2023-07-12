@@ -172,8 +172,8 @@ def main():
     # restore scaler
     scaler = StandardScaler()
     if config["format"] == "hdf5":
-        scaler.mean_ = read_hdf5(args.stats, "mean")
-        scaler.scale_ = read_hdf5(args.stats, "scale")
+        scaler.mean_ = read_hdf5(args.stats, f"{args.feat_type}_mean")
+        scaler.scale_ = read_hdf5(args.stats, f"{args.feat_type}_scale")
     elif config["format"] == "npy":
         scaler.mean_ = np.load(args.stats)[0]
         scaler.scale_ = np.load(args.stats)[1]

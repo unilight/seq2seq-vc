@@ -14,14 +14,13 @@ from seq2seq_vc.trainers.base import Trainer
 
 # set to avoid matplotlib error in CLI environment
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+
 class ARTTSTrainer(Trainer):
     """Customized trainer module for autoregressive TTS training."""
-
-    def __init__(self) -> None:
-        super().__init__()
 
     def _train_step(self, batch):
         # parse batch
@@ -41,7 +40,7 @@ class ARTTSTrainer(Trainer):
         ) = self.model(xs, ilens, ys, labels, olens, spembs)
 
         # seq2seq loss
-        l1_loss, bce_loss = self.criterion["seq2seq"](
+        l1_loss, bce_loss = self.criterion["Seq2SeqLoss"](
             after_outs, before_outs, logits, ys_, labels_, olens_
         )
         gen_loss = l1_loss + bce_loss
@@ -49,7 +48,7 @@ class ARTTSTrainer(Trainer):
         self.total_train_loss["train/bce_loss"] += bce_loss.item()
 
         # guided attention loss
-        if self.config["use_guided_attn_loss"]:
+        if self.config.get("use_guided_attn_loss", False):
             ga_loss = self.criterion["guided_attn"](att_ws, ilens_ds_st, olens_in)
             gen_loss += ga_loss
             self.total_train_loss["train/guided_attn_loss"] += ga_loss.item()
@@ -71,7 +70,7 @@ class ARTTSTrainer(Trainer):
         self.steps += 1
         self.tqdm.update(1)
         self._check_train_finish()
-    
+
     @torch.no_grad()
     def _genearete_and_save_intermediate_result(self, batch):
         """Generate and save intermediate result."""

@@ -134,12 +134,12 @@ def main():
     if config["format"] == "hdf5":
         write_hdf5(
             os.path.join(args.dumpdir, "stats.h5"),
-            "mean",
+            f"{args.feat_type}_mean",
             scaler.mean_.astype(np.float32),
         )
         write_hdf5(
             os.path.join(args.dumpdir, "stats.h5"),
-            "scale",
+            f"{args.feat_type}_scale",
             scaler.scale_.astype(np.float32),
         )
     else:

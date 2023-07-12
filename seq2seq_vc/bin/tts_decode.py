@@ -25,6 +25,7 @@ from seq2seq_vc.utils.plot import plot_attention, plot_generated_and_ref_2d, plo
 from seq2seq_vc.vocoder import Vocoder
 from seq2seq_vc.vocoder.s3prl_feat2wav import S3PRL_Feat2Wav
 from seq2seq_vc.vocoder.griffin_lim import Spectrogram2Waveform
+from seq2seq_vc.vocoder.encodec import EnCodec_decoder
 
 
 def main():
@@ -140,8 +141,8 @@ def main():
 
     # load target stats for denormalization
     config["stats"] = {
-        "mean": read_hdf5(args.stats, "mean"),
-        "scale": read_hdf5(args.stats, "scale")
+        "mean": read_hdf5(args.stats, f"{args.feat_type}_mean"),
+        "scale": read_hdf5(args.stats, f"{args.feat_type}_scale"),
     }
 
     # check arguments
@@ -190,11 +191,17 @@ def main():
 
     # load vocoder
     if config.get("vocoder", False):
-        if config["vocoder"].get("vocoder_type", "") == "s3prl_vc":
+        vocoder_type = config["vocoder"].get("vocoder_type", "")
+        if vocoder_type == "s3prl_vc":
             vocoder = S3PRL_Feat2Wav(
                 config["vocoder"]["checkpoint"],
                 config["vocoder"]["config"],
                 config["vocoder"]["stats"],
+                config["stats"],  # this is used to denormalized the converted features,
+                device,
+            )
+        elif vocoder_type == "encodec":
+            vocoder = EnCodec_decoder(
                 config["stats"],  # this is used to denormalized the converted features,
                 device,
             )
@@ -227,13 +234,6 @@ def main():
             start_time = time.time()
 
             outs, probs, att_ws = model.inference(x, config["inference"], spemb=None)
-            # ilen = torch.from_numpy(np.array([x.shape[0]])).long()
-            # (outs, *_), *_ = model.inference(
-            #     x,
-            #     ilen,
-            #     noise_scale=config["inference"]["noise_scale"],
-            #     length_scale=config["inference"]["length_scale"],
-            # )
 
             logging.info(
                 "inference speed = %.1f frames / sec."
