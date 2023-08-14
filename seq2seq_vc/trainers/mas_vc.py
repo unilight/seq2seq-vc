@@ -63,57 +63,99 @@ class MASVCTrainer(Trainer):
         dplens = batch["dplens"].to(self.device)
 
         # model forward
-        (
-            before_outs,
-            after_outs,
-            ds,
-            d_outs,
-            ilens_,
-            olens_,
-            ys_,
-            bin_loss,
-            log_p_attn,
-            olens_reduced,
-        ) = self.model(xs, ilens, ys, olens, dp_inputs, dp_lengths=dplens)
+        ret = self.model(xs, ilens, ys, olens, dp_inputs, dp_lengths=dplens)
+        ds = ret["ds"]
+        ilens_ = ret["ilens"]
+        olens_ = ret["olens"]
+        bin_loss = ret["bin_loss"]
+        log_p_attn = ret["log_p_attn"]
+        olens_reduced = ret["olens_reduced"]
 
-        # l1 loss
-        l1_loss = self.criterion["L1Loss"](after_outs, before_outs, ys_, olens_)
+        gen_loss = 0.0
+
+        # l1 loss (should not be used if a diffusion is used)
+        if "L1Loss" in self.config["criterions"]:
+            before_outs = ret["before_outs"]
+            after_outs = ret["after_outs"]
+            ys_ = ret["ys"]
+            l1_loss = self.criterion["L1Loss"](after_outs, before_outs, ys_, olens_)
+            self.total_train_loss["train/l1_loss"] += (
+                l1_loss.item() / self.gradient_accumulate_steps
+            )
+            gen_loss += l1_loss
+
+        # diffusion l2 loss
+        if "DiffSingerL2Loss" in self.config["criterions"]:
+            noise = ret["noise"]
+            x_recon = ret["x_recon"]
+            diffsinger_l2_loss = self.criterion["DiffSingerL2Loss"](
+                noise, x_recon, olens_
+            )
+            self.total_train_loss["train/diffsinger_l2_loss"] += (
+                diffsinger_l2_loss.item() / self.gradient_accumulate_steps
+            )
+            gen_loss += diffsinger_l2_loss
 
         # forward sum loss
         # use ilens_ here, which is the length shorten according to the possible conv2d encoder
-        forwardsum_loss = self.criterion["ForwardSumLoss"](
-            log_p_attn, ilens_, olens_reduced
+        if "ForwardSumLoss" in self.criterion:
+            forwardsum_loss = self.criterion["ForwardSumLoss"](
+                log_p_attn, ilens_, olens_reduced
+            )
+        elif "ForwardSumLoss_v2" in self.criterion:
+            forwardsum_loss = self.criterion["ForwardSumLoss_v2"](
+                log_p_attn, ilens_, olens_reduced
+            )
+        self.total_train_loss["train/forward_sum_loss"] += (
+            forwardsum_loss.item() / self.gradient_accumulate_steps
         )
+        self.total_train_loss["train/binary_loss"] += (
+            bin_loss.item() / self.gradient_accumulate_steps
+        )
+        gen_loss += self.config["lambda_align"] * (forwardsum_loss + bin_loss)
 
         # duration prediction loss
         if self.steps > self.config.get("dp_train_start_steps", 0):
-            duration_loss = self.criterion["DurationPredictorLoss"](d_outs, ds, ilens_)
-            self.total_train_loss["train/duration_loss"] += duration_loss.item()
+            if "DurationPredictorLoss" in self.config["criterions"]:
+                d_outs = ret["d_outs"]
+                duration_loss = self.criterion["DurationPredictorLoss"](
+                    d_outs, ds, ilens_
+                )
+            elif "StochasticDurationPredictorLoss" in self.config["criterions"]:
+                dur_nll = ret["dur_nll"]
+                duration_loss = torch.sum(dur_nll.float())
+            self.total_train_loss["train/duration_loss"] += (
+                duration_loss.item() / self.gradient_accumulate_steps
+            )
         else:
             duration_loss = 0.0
             self.total_train_loss["train/duration_loss"] += 0.0
+        gen_loss += duration_loss
 
-        self.total_train_loss["train/l1_loss"] += l1_loss.item()
-        self.total_train_loss["train/forward_sum_loss"] += forwardsum_loss.item()
-        self.total_train_loss["train/binary_loss"] += bin_loss.item()
-
-        gen_loss = (
-            l1_loss
-            + self.config["lambda_align"] * (forwardsum_loss + bin_loss)
-            + duration_loss
+        self.total_train_loss["train/loss"] += (
+            gen_loss.item() / self.gradient_accumulate_steps
         )
-        self.total_train_loss["train/loss"] += gen_loss.item()
 
         # update model
-        self.optimizer.zero_grad()
+        if self.gradient_accumulate_steps > 1:
+            gen_loss = gen_loss / self.gradient_accumulate_steps
         gen_loss.backward()
+        self.all_loss += gen_loss.item()
+        del gen_loss
+
+        self.backward_steps += 1
+        if self.backward_steps % self.gradient_accumulate_steps > 0:
+            return
+
         if self.config["grad_norm"] > 0:
             torch.nn.utils.clip_grad_norm_(
                 self.model.parameters(),
                 self.config["grad_norm"],
             )
         self.optimizer.step()
+        self.optimizer.zero_grad()
         self.scheduler.step()
+        self.all_loss = 0.0
 
         # update counts
         self.steps += 1
@@ -180,9 +222,6 @@ class MASVCTrainer(Trainer):
             os.makedirs(dirname)
 
         # generate
-        # xs, ilens, ys, olens, durations, duration_lens, spembs = tuple(
-        # [_.to(self.device) if _ is not None else _ for _ in batch]
-        # )
         xs = batch["xs"].to(self.device)
         ys = batch["ys"].to(self.device)
         ilens = batch["ilens"].to(self.device)
@@ -209,12 +248,12 @@ class MASVCTrainer(Trainer):
             )
             logging.info(
                 "duration from alignment module:   {}".format(
-                    " ".join([str(d) for d in ds.cpu().numpy()])
+                    " ".join([str(int(d)) for d in ds.cpu().numpy()])
                 )
             )
             logging.info(
                 "duration from duration predictor: {}".format(
-                    " ".join([str(d) for d in d_outs.cpu().numpy()])
+                    " ".join([str(int(d)) for d in d_outs.cpu().numpy()])
                 )
             )
 

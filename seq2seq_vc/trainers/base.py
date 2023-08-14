@@ -62,8 +62,12 @@ class Trainer(object):
         self.total_train_loss = defaultdict(float)
         self.total_eval_loss = defaultdict(float)
 
+        self.gradient_accumulate_steps = self.config.get("gradient_accumulate_steps", 1)
+
     def run(self):
         """Run training."""
+        self.backward_steps = 0
+        self.all_loss = 0.0
         self.tqdm = tqdm(
             initial=self.steps, total=self.config["train_max_steps"], desc="[train]"
         )
@@ -128,6 +132,8 @@ class Trainer(object):
         for train_steps_per_epoch, batch in enumerate(self.data_loader["train"], 1):
             # train one step
             self._train_step(batch)
+            if self.backward_steps % self.gradient_accumulate_steps > 0:
+                continue
 
             # check interval
             if self.config["rank"] == 0:

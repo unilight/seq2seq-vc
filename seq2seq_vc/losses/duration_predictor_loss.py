@@ -48,3 +48,10 @@ class DurationPredictorLoss(torch.nn.Module):
         duration_loss = self.criterion(d_outs, ds)
 
         return duration_loss
+
+
+class StochasticDurationPredictorLoss(object):
+    """Just a dummy class for the stochastis duration predictor."""
+
+    def __call__(self, *args, **kwargs):
+        return None

@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numba
 from numba import jit
 
 
@@ -107,7 +108,11 @@ def _monotonic_alignment_search_v2(log_p_attn):
     # 2.
     for j in range(1, T_mel):
         for i in range(1, min(j + 1, T_inp)):
-            Q[i, j] = max(Q[i - 1, j - 1], Q[i, j - 1], Q[i - 1, j]) + log_prob[i, j]
+            Q[i, j] = max(
+                Q[i - 1, j - 1] * 2 + log_prob[i, j],
+                Q[i, j - 1] + log_prob[i, j],
+                Q[i - 1, j] + log_prob[i, j],
+            )
 
     # 3.
     A = np.full((T_mel,), fill_value=T_inp - 1)
@@ -136,7 +141,144 @@ def _monotonic_alignment_search_v2(log_p_attn):
     return A
 
 
-def viterbi_decode(log_p_attn, text_lengths, feats_lengths):
+@jit(nopython=True)
+def _monotonic_alignment_search_k(log_p_attn, k):
+    # https://arxiv.org/abs/2005.11129
+    T_mel = log_p_attn.shape[0]
+    T_inp = log_p_attn.shape[1]
+    Q = np.full((T_inp, T_mel), fill_value=-np.inf)
+
+    log_prob = log_p_attn.transpose(1, 0)  # -> (T_inp,T_mel)
+    # 1.  Q <- init first row for all j
+    for j in range(T_mel):
+        Q[0, j] = log_prob[0, : j + 1].sum()
+
+    # 2.
+    for j in range(1, T_mel):
+        for i in range(1, min(j + 1, T_inp)):
+            candidates = [Q[i - _k, j - 1] for _k in range(k) if i - _k >= 0]
+            Q[i, j] = max(candidates) + log_prob[i, j]
+
+    # 3.
+    A = np.full((T_mel,), fill_value=T_inp - 1)
+    for j in range(T_mel - 2, -1, -1):  # T_mel-2, ..., 0
+        # 'i' in {A[j+1]-2, A[j+1]-1, A[j+1]}
+        candidates = [A[j + 1]]
+        for _k in range(1, k):
+            candidate = A[j + 1] - _k
+            if candidate < 0:
+                break
+            else:
+                candidates.append(candidate)
+
+        # argmax
+        argmax_i = candidates[0]
+        current_max = Q[argmax_i, j]
+        for candidate in candidates[1:]:
+            if Q[candidate, j] >= current_max:  # ">=": aggressively move backward
+                argmax_i = candidate
+                current_max = Q[candidate, j]
+        A[j] = argmax_i
+    return A
+
+
+@jit(nopython=True)
+def _monotonic_alignment_search_v4_k(log_p_attn, k):
+    # https://arxiv.org/abs/2005.11129
+    T_mel = log_p_attn.shape[0]
+    T_inp = log_p_attn.shape[1]
+    Q = np.full((T_inp, T_mel), fill_value=-np.inf)
+
+    log_prob = log_p_attn.transpose(1, 0)  # -> (T_inp,T_mel)
+    # 1.  Q <- init first row for all j
+    for j in range(T_mel):
+        Q[0, j] = log_prob[0, : j + 1].sum()
+
+    # 2.
+    for j in range(1, T_mel):
+        for i in range(1, min(j + 1, T_inp)):
+            candidates = [Q[i - _k, j - 1] for _k in range(k) if i - _k >= 0]
+            Q[i, j] = max(candidates) + log_prob[i, j]
+
+    # 3.
+    A = np.full((T_mel,), fill_value=T_inp - 1)
+    for j in range(T_mel - 2, -1, -1):  # T_mel-2, ..., 0
+        # 'i' in {A[j+1]-2, A[j+1]-1, A[j+1]}
+        candidates = [A[j + 1]]
+        for _k in range(1, k):
+            candidate = A[j + 1] - _k
+            if candidate < 0:
+                break
+            else:
+                candidates.append(candidate)
+
+        # argmax
+        argmax_i = candidates[0]
+        current_max = Q[argmax_i, j]
+        for candidate in candidates[1:]:
+            if Q[candidate, j] > current_max:  # ">=": aggressively move backward
+                argmax_i = candidate
+                current_max = Q[candidate, j]
+        A[j] = argmax_i
+    return A
+
+
+@jit((numba.float64[:, :], numba.int8, numba.boolean), nopython=True)
+def _monotonic_alignment_search_v5(log_p_attn, k, transpose):
+    # https://arxiv.org/abs/2005.11129
+    T_mel = log_p_attn.shape[0]
+    T_inp = log_p_attn.shape[1]
+    Q = np.full((T_inp, T_mel), fill_value=-np.inf)
+
+    log_prob = log_p_attn.transpose(1, 0)  # -> (T_inp,T_mel)
+
+    # the usual case
+    if not transpose:
+        # 1.  Q <- init first row for all j
+        for j in range(T_mel):
+            Q[0, j] = log_prob[0, : j + 1].sum()
+
+        # 2.
+        for j in range(1, T_mel):
+            for i in range(1, min(j + 1, T_inp)):
+                candidates = [Q[i - _k, j - 1] for _k in range(k) if i - _k >= 0]
+                Q[i, j] = max(candidates) + log_prob[i, j]
+    else:
+        # 1.  Q <- init first row for all j
+        for i in range(T_inp):
+            Q[i, 0] = log_prob[: i + 1, 0].sum()
+
+        # 2.
+        for i in range(1, T_inp):
+            for j in range(1, min(i + 1, T_mel)):
+                # candidates = [Q[i - _k, j - 1] for _k in range(k) if i - _k >= 0]
+                candidates = [Q[i - 1, j - _k] for _k in range(k) if j - _k >= 0]
+                Q[i, j] = max(candidates) + log_prob[i, j]
+
+    # 3.
+    A = np.full((T_mel,), fill_value=T_inp - 1)
+    for j in range(T_mel - 2, -1, -1):  # T_mel-2, ..., 0
+        # 'i' in {A[j+1]-2, A[j+1]-1, A[j+1]}
+        candidates = [A[j + 1]]
+        for _k in range(1, k):
+            candidate = A[j + 1] - _k
+            if candidate < 0:
+                break
+            else:
+                candidates.append(candidate)
+
+        # argmax
+        argmax_i = candidates[0]
+        current_max = Q[argmax_i, j]
+        for candidate in candidates[1:]:
+            if Q[candidate, j] > current_max:  # ">=": aggressively move backward
+                argmax_i = candidate
+                current_max = Q[candidate, j]
+        A[j] = argmax_i
+    return A
+
+
+def viterbi_decode(log_p_attn, text_lengths, feats_lengths, k=None):
     """Extract duration from an attention probability matrix
 
     Args:
@@ -168,7 +310,7 @@ def viterbi_decode(log_p_attn, text_lengths, feats_lengths):
     return ds, bin_loss
 
 
-def viterbi_decode_v2(log_p_attn, text_lengths, feats_lengths):
+def viterbi_decode_v2(log_p_attn, text_lengths, feats_lengths, k=None):
     """Extract duration from an attention probability matrix
 
     Args:
@@ -199,6 +341,117 @@ def viterbi_decode_v2(log_p_attn, text_lengths, feats_lengths):
     bin_loss = bin_loss / B
     return ds, bin_loss
 
+
+def viterbi_decode_k(log_p_attn, text_lengths, feats_lengths, k=2):
+    """Extract duration from an attention probability matrix
+
+    Args:
+        log_p_attn (Tensor): Batched log probability of attention
+            matrix (B, T_feats, T_text).
+        text_lengths (Tensor): Text length tensor (B,).
+        feats_legnths (Tensor): Feature length tensor (B,).
+        k (int): number of frames to backtrack
+
+    Returns:
+        Tensor: Batched token duration extracted from `log_p_attn` (B, T_text).
+        Tensor: Binarization loss tensor ().
+
+    """
+    assert k >= 2
+    B = log_p_attn.size(0)
+    T_text = log_p_attn.size(2)
+    device = log_p_attn.device
+
+    bin_loss = 0
+    ds = torch.zeros((B, T_text), device=device)
+    for b in range(B):
+        cur_log_p_attn = log_p_attn[b, : feats_lengths[b], : text_lengths[b]]
+        viterbi = _monotonic_alignment_search_k(
+            cur_log_p_attn.detach().cpu().numpy(), k
+        )
+        _ds = np.bincount(viterbi)
+        ds[b, : len(_ds)] = torch.from_numpy(_ds).to(device)
+
+        t_idx = torch.arange(feats_lengths[b])
+        bin_loss = bin_loss - cur_log_p_attn[t_idx, viterbi].mean()
+    bin_loss = bin_loss / B
+    return ds, bin_loss
+
+
+def viterbi_decode_v4_k(log_p_attn, text_lengths, feats_lengths, k=2):
+    """Extract duration from an attention probability matrix
+
+    Args:
+        log_p_attn (Tensor): Batched log probability of attention
+            matrix (B, T_feats, T_text).
+        text_lengths (Tensor): Text length tensor (B,).
+        feats_legnths (Tensor): Feature length tensor (B,).
+        k (int): number of frames to backtrack
+
+    Returns:
+        Tensor: Batched token duration extracted from `log_p_attn` (B, T_text).
+        Tensor: Binarization loss tensor ().
+
+    """
+    assert k >= 2
+    B = log_p_attn.size(0)
+    T_text = log_p_attn.size(2)
+    device = log_p_attn.device
+
+    bin_loss = 0
+    ds = torch.zeros((B, T_text), device=device)
+    for b in range(B):
+        cur_log_p_attn = log_p_attn[b, : feats_lengths[b], : text_lengths[b]]
+        viterbi = _monotonic_alignment_search_v4_k(
+            cur_log_p_attn.detach().cpu().numpy(), k
+        )
+        _ds = np.bincount(viterbi)
+        ds[b, : len(_ds)] = torch.from_numpy(_ds).to(device)
+
+        t_idx = torch.arange(feats_lengths[b])
+        bin_loss = bin_loss - cur_log_p_attn[t_idx, viterbi].mean()
+    bin_loss = bin_loss / B
+    return ds, bin_loss
+
+# v5 changes the direction according to the length of the input and output
+# but k is not implemented yet
+def viterbi_decode_v5(log_p_attn, text_lengths, feats_lengths, k=2):
+    """Extract duration from an attention probability matrix
+
+    Args:
+        log_p_attn (Tensor): Batched log probability of attention
+            matrix (B, T_feats, T_text).
+        text_lengths (Tensor): Text length tensor (B,).
+        feats_legnths (Tensor): Feature length tensor (B,).
+        k (int): number of frames to backtrack
+
+    Returns:
+        Tensor: Batched token duration extracted from `log_p_attn` (B, T_text).
+        Tensor: Binarization loss tensor ().
+
+    """
+    assert k >= 2
+    B = log_p_attn.size(0)
+    T_text = log_p_attn.size(2)
+    device = log_p_attn.device
+
+    bin_loss = 0
+    ds = torch.zeros((B, T_text), device=device)
+    for b in range(B):
+        cur_log_p_attn = log_p_attn[b, : feats_lengths[b], : text_lengths[b]]
+        transpose = bool(feats_lengths[b] >= text_lengths[b])
+        viterbi = _monotonic_alignment_search_v5(
+            cur_log_p_attn.detach().cpu().numpy().astype(np.float64),
+            np.int8(k),
+            transpose,
+        )
+        _ds = np.bincount(viterbi)
+        ds[b, : len(_ds)] = torch.from_numpy(_ds).to(device)
+
+        t_idx = torch.arange(feats_lengths[b])
+        bin_loss = bin_loss - cur_log_p_attn[t_idx, viterbi].mean()
+    bin_loss = bin_loss / B
+    return ds, bin_loss
 
 @jit(nopython=True)
 def _average_by_duration(ds, xs, text_lengths, feats_lengths):

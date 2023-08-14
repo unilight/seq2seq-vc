@@ -177,7 +177,7 @@ def main():
         mel_query = "*.h5"
         mel_load_fn = lambda x: read_hdf5(x, args.src_feat_type)  # NOQA
         dp_input_load_fn = lambda x: read_hdf5(
-            x, config.get("duration_predictor_feat", "feats")
+            x, config.get("duration_predictor_feat", "mel")
         )  # NOQA
         if args.use_teacher_forcing:
             dataset = ParallelVCMelDataset(
@@ -304,7 +304,7 @@ def main():
                 x = torch.tensor(x, dtype=torch.float).to(device)
                 dp_input = torch.tensor(dp_input, dtype=torch.float).to(device)
                 outs, d_outs = model.inference(x, dp_input=dp_input)
-                duration = [str(d) for d in d_outs.cpu().numpy()]
+                duration = [str(int(d)) for d in d_outs.cpu().numpy()]
 
             logging.info(
                 "inference speed = %.1f frames / sec."
@@ -357,7 +357,7 @@ def main():
                 # generate durations from att_ws
                 duration, focus_rate = duration_calculator(att_ws)
                 logging.info(f"focus rate = {focus_rate:.3f}")
-                duration = [str(d) for d in duration.cpu().numpy()]
+                duration = [str(int(d)) for d in duration.cpu().numpy()]
 
             if (ar and args.use_teacher_forcing) or (not ar):
                 # write durations

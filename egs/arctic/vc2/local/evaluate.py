@@ -12,6 +12,7 @@ import numpy as np
 import librosa
 
 import torch
+import torchaudio
 from tqdm import tqdm
 import yaml
 
@@ -57,7 +58,7 @@ def _calculate_asr_score(model, device, file_list, groundtruths):
 
     return ers, cer, wer
 
-def _calculate_mcd_f0(file_list, gt_root, trgspk, f0min, f0max, results):
+def _calculate_mcd_f0(file_list, gt_root, segments, trgspk, f0min, f0max, results):
     for i, cvt_wav_path in enumerate(file_list):
         basename = get_basename(cvt_wav_path)
         
@@ -66,8 +67,15 @@ def _calculate_mcd_f0(file_list, gt_root, trgspk, f0min, f0max, results):
 
         # read both converted and ground truth wav
         cvt_wav, cvt_fs = librosa.load(cvt_wav_path, sr=None)
-        gt_wav, gt_fs = librosa.load(gt_wav_path, sr=None)
-        assert cvt_fs == gt_fs
+        if segments is not None:
+            gt_wav, gt_fs = librosa.load(gt_wav_path, sr=None,
+                                         offset=segments[basename]["offset"],
+                                         duration=segments[basename]["duration"]
+                                         )
+        else:
+            gt_wav, gt_fs = librosa.load(gt_wav_path, sr=None)
+        if cvt_fs != gt_fs:
+            cvt_wav = torchaudio.transforms.Resample(cvt_fs, gt_fs)(torch.from_numpy(cvt_wav)).numpy()
 
         # calculate MCD, F0RMSE, F0CORR and DDUR
         mcd, f0rmse, f0corr, ddur = calculate_mcd_f0(cvt_wav, gt_wav, gt_fs, f0min, f0max)
@@ -79,6 +87,7 @@ def get_parser():
     parser.add_argument("--wavdir", required=True, type=str, help="directory for converted waveforms")
     parser.add_argument("--trgspk", required=True, type=str, help="target speaker")
     parser.add_argument("--data_root", type=str, default="./data", help="directory of data")
+    parser.add_argument("--segments", type=str, default=None, help="segments file")
     parser.add_argument("--f0_path", required=True, type=str, help="yaml file storing f0 ranges")
     parser.add_argument("--n_jobs", default=10, type=int, help="number of parallel jobs")
     return parser
@@ -102,6 +111,20 @@ def main():
     with open(transcription_path, "r") as f:
         lines = f.read().splitlines()
     groundtruths = {line.split(" ")[1]: " ".join(line.split(" ")[2:-1]).replace('"', '') for line in lines}
+
+    # load segments if provided
+    if args.segments is not None:
+        with open(args.segments, "r") as f:
+            lines = f.read().splitlines()
+        segments = {}
+        for line in lines:
+            _id, _, start, end = line.split(" ")
+            segments[_id] = {
+                "offset": float(start),
+                "duration": float(end) - float(start)
+            }
+    else:
+        segments = None
 
     # find converted files
     converted_files = sorted(find_files(args.wavdir, query="*.wav"))
@@ -130,7 +153,7 @@ def main():
         for f in file_lists:
             p = mp.Process(
                 target=_calculate_mcd_f0,
-                args=(f, gt_root, trgspk, f0min, f0max, results),
+                args=(f, gt_root, segments, trgspk, f0min, f0max, results),
             )
             p.start()
             processes.append(p)

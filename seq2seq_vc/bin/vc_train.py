@@ -33,6 +33,7 @@ import seq2seq_vc.collaters
 from seq2seq_vc.datasets import ParallelVCMelDataset
 
 from seq2seq_vc.utils import read_hdf5
+from seq2seq_vc.utils.types import str_or_none
 from seq2seq_vc.vocoder import Vocoder
 from seq2seq_vc.vocoder.s3prl_feat2wav import S3PRL_Feat2Wav
 from seq2seq_vc.vocoder.griffin_lim import Spectrogram2Waveform
@@ -103,13 +104,13 @@ def main():
     parser.add_argument(
         "--train-dp-input-dir",
         default=None,
-        type=str,
+        type=str_or_none,
         help=("directory including training duration predictor input feature files. "),
     )
     parser.add_argument(
         "--dev-dp-input-dir",
         default=None,
-        type=str,
+        type=str_or_none,
         help=(
             "directory including development duration predictor input feature files. "
         ),
@@ -126,13 +127,13 @@ def main():
     parser.add_argument(
         "--train-duration-dir",
         default=None,
-        type=str,
+        type=str_or_none,
         help=("directory including training durations files. "),
     )
     parser.add_argument(
         "--dev-duration-dir",
         default=None,
-        type=str,
+        type=str_or_none,
         help=("directory including development durations files. "),
     )
     parser.add_argument(
@@ -276,6 +277,7 @@ def main():
         durations_dir=args.train_duration_dir,
         reduction_factor=config.get("teacher_duration_reduction_factor", 1),
         allow_cache=config.get("allow_cache", False),  # keep compatibility
+        mp=config.get("mp", True),  # keep compatibility
     )
     logging.info(f"The number of training files = {len(train_dataset)}.")
     dev_dataset = ParallelVCMelDataset(
@@ -290,6 +292,7 @@ def main():
         durations_dir=args.dev_duration_dir,
         reduction_factor=config.get("teacher_duration_reduction_factor", 1),
         allow_cache=config.get("allow_cache", False),  # keep compatibility
+        mp=config.get("mp", True),  # keep compatibility
     )
     logging.info(f"The number of development files = {len(dev_dataset)}.")
     dataset = {

@@ -12,7 +12,10 @@ from seq2seq_vc.modules.pre_postnets import Prenet, Postnet
 from seq2seq_vc.modules.transformer.mask import subsequent_mask
 from seq2seq_vc.layers.utils import make_pad_mask, make_non_pad_mask
 from seq2seq_vc.modules.transformer.attention import MultiHeadedAttention
-from seq2seq_vc.modules.duration_predictor import DurationPredictor
+from seq2seq_vc.modules.duration_predictor import (
+    DurationPredictor,
+    StochasticDurationPredictor,
+)
 from seq2seq_vc.modules.length_regulator import GaussianUpsampling
 
 from seq2seq_vc.modules.transformer.subsampling import Conv2dSubsampling
@@ -22,7 +25,14 @@ from seq2seq_vc.modules.alignments import (
     average_by_duration,
     viterbi_decode,
     viterbi_decode_v2,
+    viterbi_decode_k,
+    viterbi_decode_v4_k,
+    viterbi_decode_v5,
 )
+from seq2seq_vc.modules.diffsinger import GaussianDiffusion, DiffNet
+from seq2seq_vc.modules.prodiff.denoiser import SpectogramDenoiser
+
+MAX_DP_OUTPUT = 10
 
 
 class MASVC(torch.nn.Module):
@@ -55,9 +65,11 @@ class MASVC(torch.nn.Module):
         duration_predictor_chans: int = 384,
         duration_predictor_kernel_size: int = 3,
         encoder_reduction_factor: int = 1,
+        post_encoder_reduction_factor: int = 1,
         decoder_reduction_factor: int = 1,
         encoder_type: str = "transformer",
         decoder_type: str = "transformer",
+        duration_predictor_type: str = "deterministic",
         # only for conformer
         conformer_pos_enc_layer_type: str = "rel_pos",
         conformer_self_attn_layer_type: str = "rel_selfattn",
@@ -86,6 +98,23 @@ class MASVC(torch.nn.Module):
         teacher_model_decoder_reduction_factor: int = 4,
         # viterbi
         viterbi_version: str = "v1",
+        viterbi_k: int = 2,
+        # diffsinger
+        diffsinger_denoiser_residual_channels: int = 256,
+        # prodiff
+        prodiff_denoiser_layers: int = 20,
+        prodiff_denoiser_channels: int = 256,
+        prodiff_diffusion_steps: int = 1000,
+        prodiff_diffusion_timescale: int = 1,
+        prodiff_diffusion_beta: float = 40.0,
+        prodiff_diffusion_scheduler: str = "vpsde",
+        prodiff_diffusion_cycle_ln: int = 1,
+        # stochastic duration predictor
+        stochastic_duration_predictor_kernel_size: int = 3,
+        stochastic_duration_predictor_dropout_rate: float = 0.5,
+        stochastic_duration_predictor_flows: int = 4,
+        stochastic_duration_predictor_dds_conv_layers: int = 3,
+        stochastic_duration_predictor_noise_scale: float = 0.8,
     ):
         # initialize base classes
         torch.nn.Module.__init__(self)
@@ -97,9 +126,11 @@ class MASVC(torch.nn.Module):
         if self.spk_embed_dim is not None:
             self.spk_embed_integration_type = spk_embed_integration_type
         self.encoder_reduction_factor = encoder_reduction_factor
+        self.post_encoder_reduction_factor = post_encoder_reduction_factor
         self.decoder_reduction_factor = decoder_reduction_factor
         self.encoder_type = encoder_type
         self.decoder_type = decoder_type
+        self.duration_predictor_type = duration_predictor_type
         self.use_scaled_pos_enc = use_scaled_pos_enc
         self.encoder_input_layer = encoder_input_layer
         self.teacher_model_decoder_reduction_factor = (
@@ -113,6 +144,16 @@ class MASVC(torch.nn.Module):
             self.viterbi_func = viterbi_decode
         elif viterbi_version == "v2":
             self.viterbi_func = viterbi_decode_v2
+        elif viterbi_version == "v3":
+            self.viterbi_func = viterbi_decode_k
+        elif viterbi_version == "v4":
+            self.viterbi_func = viterbi_decode_v4_k
+        elif viterbi_version == "v5":
+            self.viterbi_func = viterbi_decode_v5
+        self.viterbi_k = viterbi_k
+        self.stochastic_duration_predictor_noise_scale = (
+            stochastic_duration_predictor_noise_scale
+        )
 
         # define encoder
         if encoder_type == "transformer":
@@ -162,13 +203,28 @@ class MASVC(torch.nn.Module):
                 self.projection = torch.nn.Linear(adim + self.spk_embed_dim, adim)
 
         # define duration predictor
-        self.duration_predictor = DurationPredictor(
-            idim=adim,
-            n_layers=duration_predictor_layers,
-            n_chans=duration_predictor_chans,
-            kernel_size=duration_predictor_kernel_size,
-            dropout_rate=duration_predictor_dropout_rate,
-        )
+        if duration_predictor_type == "deterministic":
+            self.duration_predictor = DurationPredictor(
+                idim=adim,
+                n_layers=duration_predictor_layers,
+                n_chans=duration_predictor_chans,
+                kernel_size=duration_predictor_kernel_size,
+                dropout_rate=duration_predictor_dropout_rate,
+            )
+        elif duration_predictor_type == "stochastic":
+            self.duration_predictor = StochasticDurationPredictor(
+                channels=adim,
+                kernel_size=stochastic_duration_predictor_kernel_size,
+                dropout_rate=stochastic_duration_predictor_dropout_rate,
+                flows=stochastic_duration_predictor_flows,
+                dds_conv_layers=stochastic_duration_predictor_dds_conv_layers,
+                global_channels=-1,  # not used for now
+            )
+        else:
+            raise ValueError(
+                f"Duration predictor type: {duration_predictor_type} is not supported."
+            )
+
         # define extra projection layer
         if not self.duration_predictor_use_encoder_outputs:
             self.duration_predictor_projection = Conv2dSubsampling(
@@ -176,72 +232,99 @@ class MASVC(torch.nn.Module):
             )
 
         # define AlignmentModule
-        self.alignment_module = AlignmentModule(adim, odim * decoder_reduction_factor)
+        self.alignment_module = AlignmentModule(
+            adim * post_encoder_reduction_factor, odim * decoder_reduction_factor
+        )
 
         # define length regulator
         self.length_regulator = GaussianUpsampling()
 
         # define decoder
-        # NOTE: we use encoder as decoder
-        # because fastspeech's decoder is the same as encoder
-        if decoder_type == "transformer":
-            self.decoder = TransformerEncoder(
-                idim=0,
-                attention_dim=adim,
-                attention_heads=aheads,
-                linear_units=dunits,
-                num_blocks=dlayers,
-                input_layer=None,
-                dropout_rate=transformer_dec_dropout_rate,
-                positional_dropout_rate=transformer_dec_positional_dropout_rate,
-                attention_dropout_rate=transformer_dec_attn_dropout_rate,
-                pos_enc_class=pos_enc_class,
-                normalize_before=decoder_normalize_before,
-                concat_after=decoder_concat_after,
-                positionwise_layer_type=positionwise_layer_type,
-                positionwise_conv_kernel_size=positionwise_conv_kernel_size,
-            )
-        elif decoder_type == "conformer":
-            self.decoder = ConformerEncoder(
-                idim=0,
-                attention_dim=adim,
-                attention_heads=aheads,
-                linear_units=dunits,
-                num_blocks=dlayers,
-                input_layer=None,
-                dropout_rate=transformer_dec_dropout_rate,
-                positional_dropout_rate=transformer_dec_positional_dropout_rate,
-                attention_dropout_rate=transformer_dec_attn_dropout_rate,
-                normalize_before=decoder_normalize_before,
-                concat_after=decoder_concat_after,
-                positionwise_layer_type=positionwise_layer_type,
-                positionwise_conv_kernel_size=positionwise_conv_kernel_size,
-                macaron_style=use_macaron_style_in_conformer,
-                pos_enc_layer_type=conformer_pos_enc_layer_type,
-                selfattention_layer_type=conformer_self_attn_layer_type,
-                use_cnn_module=use_cnn_in_conformer,
-                cnn_module_kernel=conformer_dec_kernel_size,
+        if not decoder_type in ["diffsinger", "transformer", "conformer", "prodiff"]:
+            raise ValueError(f"Decoder type: {decoder_type} is not supported.")
+        if decoder_type == "diffsinger":
+            self.decoder = GaussianDiffusion(
+                in_dim=adim,
+                out_dim=odim * decoder_reduction_factor,
+                denoise_fn=DiffNet(
+                    encoder_hidden_dim=adim,
+                    residual_channels=diffsinger_denoiser_residual_channels,
+                ),
             )
         else:
-            raise ValueError(f"{decoder_type} is not supported.")
+            if decoder_type == "prodiff":
+                self.decoder = SpectogramDenoiser(
+                    odim * decoder_reduction_factor,
+                    adim=adim * post_encoder_reduction_factor,
+                    layers=prodiff_denoiser_layers,
+                    channels=prodiff_denoiser_channels,
+                    timesteps=prodiff_diffusion_steps,
+                    timescale=prodiff_diffusion_timescale,
+                    max_beta=prodiff_diffusion_beta,
+                    scheduler=prodiff_diffusion_scheduler,
+                    cycle_length=prodiff_diffusion_cycle_ln,
+                )
+            else:
+                # NOTE: we use encoder as decoder
+                # because fastspeech's decoder is the same as encoder
+                if decoder_type == "transformer":
+                    self.decoder = TransformerEncoder(
+                        idim=0,
+                        attention_dim=adim * post_encoder_reduction_factor,
+                        attention_heads=aheads,
+                        linear_units=dunits,
+                        num_blocks=dlayers,
+                        input_layer=None,
+                        dropout_rate=transformer_dec_dropout_rate,
+                        positional_dropout_rate=transformer_dec_positional_dropout_rate,
+                        attention_dropout_rate=transformer_dec_attn_dropout_rate,
+                        pos_enc_class=pos_enc_class,
+                        normalize_before=decoder_normalize_before,
+                        concat_after=decoder_concat_after,
+                        positionwise_layer_type=positionwise_layer_type,
+                        positionwise_conv_kernel_size=positionwise_conv_kernel_size,
+                    )
+                elif decoder_type == "conformer":
+                    self.decoder = ConformerEncoder(
+                        idim=0,
+                        attention_dim=adim * post_encoder_reduction_factor,
+                        attention_heads=aheads,
+                        linear_units=dunits,
+                        num_blocks=dlayers,
+                        input_layer=None,
+                        dropout_rate=transformer_dec_dropout_rate,
+                        positional_dropout_rate=transformer_dec_positional_dropout_rate,
+                        attention_dropout_rate=transformer_dec_attn_dropout_rate,
+                        normalize_before=decoder_normalize_before,
+                        concat_after=decoder_concat_after,
+                        positionwise_layer_type=positionwise_layer_type,
+                        positionwise_conv_kernel_size=positionwise_conv_kernel_size,
+                        macaron_style=use_macaron_style_in_conformer,
+                        pos_enc_layer_type=conformer_pos_enc_layer_type,
+                        selfattention_layer_type=conformer_self_attn_layer_type,
+                        use_cnn_module=use_cnn_in_conformer,
+                        cnn_module_kernel=conformer_dec_kernel_size,
+                    )
+                # define final projection
+                self.feat_out = torch.nn.Linear(
+                    adim * post_encoder_reduction_factor,
+                    odim * decoder_reduction_factor,
+                )
 
-        # define final projection
-        self.feat_out = torch.nn.Linear(adim, odim * decoder_reduction_factor)
-
-        # define postnet
-        self.postnet = (
-            None
-            if postnet_layers == 0
-            else Postnet(
-                idim=idim,
-                odim=odim,
-                n_layers=postnet_layers,
-                n_chans=postnet_chans,
-                n_filts=postnet_filts,
-                use_batch_norm=use_batch_norm,
-                dropout_rate=postnet_dropout_rate,
+            # only diffsinger does not have postnet
+            self.postnet = (
+                None
+                if postnet_layers == 0
+                else Postnet(
+                    idim=idim,
+                    odim=odim,
+                    n_layers=postnet_layers,
+                    n_chans=postnet_chans,
+                    n_filts=postnet_filts,
+                    use_batch_norm=use_batch_norm,
+                    dropout_rate=postnet_dropout_rate,
+                )
             )
-        )
 
         # initialize parameters
         self._reset_parameters(
@@ -268,6 +351,8 @@ class MASVC(torch.nn.Module):
         is_inference: bool = False,
         alpha: float = 1.0,
     ):
+        ret = {}
+
         # check encoder reduction factor
         if self.encoder_reduction_factor > 1:
             # reshape inputs if use reduction factor for encoder
@@ -294,6 +379,22 @@ class MASVC(torch.nn.Module):
         if self.spk_embed_dim is not None:
             hs = self._integrate_with_spk_embed(hs, spembs)
 
+        # check post encoder reduction factor
+        if self.post_encoder_reduction_factor > 1:
+            # reshape inputs if use reduction factor for encoder
+            # (B, Tmax, idim) ->  (B, Tmax // r_e, idim * r_e)
+            batch_size, max_length, dim = hs.shape
+            if max_length % self.post_encoder_reduction_factor != 0:
+                hs = hs[:, : -(max_length % self.post_encoder_reduction_factor)]
+            hs = hs.contiguous().view(
+                batch_size,
+                max_length // self.post_encoder_reduction_factor,
+                dim * self.post_encoder_reduction_factor,
+            )
+            ilens = ilens.new(
+                [ilen // self.post_encoder_reduction_factor for ilen in ilens]
+            )
+
         # interpolate duration predictor input to match that of encoder output
         if self.duration_predictor_use_encoder_outputs:
             _dp_inputs = hs
@@ -314,7 +415,7 @@ class MASVC(torch.nn.Module):
             _dp_inputs = _dp_inputs_interpolated
 
         # adjust ys and olens
-        if self.decoder_reduction_factor > 1 and not is_inference:
+        if self.decoder_reduction_factor > 1 and ys is not None:
             batch_size, max_y_length, y_dim = ys.shape
             if max_y_length % self.decoder_reduction_factor != 0:
                 ys = ys[:, : -(max_y_length % self.decoder_reduction_factor)]
@@ -338,10 +439,23 @@ class MASVC(torch.nn.Module):
                 bin_loss = 0.0
             else:
                 log_p_attn = self.alignment_module(hs, ys, h_masks)
-                ds, bin_loss = self.viterbi_func(log_p_attn, ilens, olens_reduced)
+                ds, bin_loss = self.viterbi_func(
+                    log_p_attn, ilens, olens_reduced, k=self.viterbi_k
+                )
 
             # forward duration predictor
-            d_outs = self.duration_predictor.inference(_dp_inputs, None)
+            if self.duration_predictor_type == "deterministic":
+                d_outs = self.duration_predictor.inference(_dp_inputs, None)
+            elif self.duration_predictor_type == "stochastic":
+                _h_masks = make_non_pad_mask(ilens).to(_dp_inputs.device)
+                d_outs = self.duration_predictor(
+                    _dp_inputs.transpose(1, 2),
+                    _h_masks.unsqueeze(1),
+                    inverse=True,
+                    noise_scale=self.stochastic_duration_predictor_noise_scale,
+                ).squeeze(1)
+            d_outs = torch.clamp(d_outs, max=MAX_DP_OUTPUT)
+            ret["d_outs"] = d_outs
 
             # upsampling
             d_masks = make_non_pad_mask(ilens).to(d_outs.device)
@@ -349,11 +463,24 @@ class MASVC(torch.nn.Module):
         else:
             # forward alignment module and obtain duration
             log_p_attn = self.alignment_module(hs, ys, h_masks)
-            ds, bin_loss = self.viterbi_func(log_p_attn, ilens, olens_reduced)
+            ds, bin_loss = self.viterbi_func(
+                log_p_attn, ilens, olens_reduced, k=self.viterbi_k
+            )
 
             # forward duration predictor
             h_masks = make_non_pad_mask(ilens).to(hs.device)
-            d_outs = self.duration_predictor(_dp_inputs, h_masks)
+            if self.duration_predictor_type == "deterministic":
+                d_outs = self.duration_predictor(_dp_inputs, h_masks)
+                d_outs = torch.clamp(d_outs, max=MAX_DP_OUTPUT)
+                ret["d_outs"] = d_outs
+            elif self.duration_predictor_type == "stochastic":
+                dur_nll = self.duration_predictor(
+                    _dp_inputs.transpose(1, 2),  # (B, T, C)
+                    h_masks.unsqueeze(1),
+                    w=ds.unsqueeze(1),  # (B, 1, T_text)
+                )
+                dur_nll = dur_nll / torch.sum(h_masks)
+                ret["dur_nll"] = dur_nll
 
             # upsampling
             hs = self.length_regulator(
@@ -369,29 +496,43 @@ class MASVC(torch.nn.Module):
         else:
             h_masks = None
 
-        zs, _ = self.decoder(hs, h_masks)  # (B, Lmax, adim)
-        before_outs = self.feat_out(zs).view(
-            zs.size(0), -1, self.odim
-        )  # (B, Lmax, odim)
-
-        # postnet -> (B, Lmax//r * r, odim)
-        if self.postnet is None:
-            after_outs = before_outs
+        if self.decoder_type == "diffsinger":
+            if is_inference:
+                after_outs = self.decoder.inference(hs)
+                ret["after_outs"] = after_outs
+            else:
+                noise, x_recon = self.decoder(hs, olens_reduced, ys)
+                ret["noise"] = noise
+                ret["x_recon"] = x_recon
         else:
-            after_outs = before_outs + self.postnet(
-                before_outs.transpose(1, 2)
-            ).transpose(1, 2)
+            if self.decoder_type == "prodiff":  # no feat_out
+                before_outs = self.decoder(
+                    hs, ys, h_masks, is_inference
+                )  # (B, T_feats, odim)
+            else:
+                zs, _ = self.decoder(hs, h_masks)  # (B, Lmax, adim)
+                before_outs = self.feat_out(zs).view(
+                    zs.size(0), -1, self.odim
+                )  # (B, Lmax, odim)
 
-        return (
-            before_outs,
-            after_outs,
-            ds,
-            d_outs,
-            ilens,
-            bin_loss,
-            log_p_attn,
-            olens_reduced,
-        )
+            # postnet -> (B, Lmax//r * r, odim)
+            if self.postnet is None:
+                after_outs = before_outs
+            else:
+                after_outs = before_outs + self.postnet(
+                    before_outs.transpose(1, 2)
+                ).transpose(1, 2)
+
+            ret["before_outs"] = before_outs
+            ret["after_outs"] = after_outs
+
+        ret["ds"] = ds
+        ret["ilens"] = ilens
+        ret["bin_loss"] = bin_loss
+        ret["log_p_attn"] = log_p_attn
+        ret["olens_reduced"] = olens_reduced
+
+        return ret
 
     def forward(
         self,
@@ -427,16 +568,17 @@ class MASVC(torch.nn.Module):
         ilens, olens = src_speech_lengths, tgt_speech_lengths
 
         # forward propagation
-        (
-            before_outs,
-            after_outs,
-            ds,
-            d_outs,
-            ilens_,
-            bin_loss,
-            log_p_attn,
-            olens_reduced,
-        ) = self._forward(
+        # (
+        #     before_outs,
+        #     after_outs,
+        #     ds,
+        #     d_outs,
+        #     ilens_,
+        #     bin_loss,
+        #     log_p_attn,
+        #     olens_reduced,
+        # )
+        ret = self._forward(
             xs,
             ilens,
             ys,
@@ -455,18 +597,23 @@ class MASVC(torch.nn.Module):
             max_olen = max(olens)
             ys = ys[:, :max_olen]
 
-        return (
-            before_outs,
-            after_outs,
-            ds,
-            d_outs,
-            ilens_,
-            olens,
-            ys,
-            bin_loss,
-            log_p_attn,
-            olens_reduced,
-        )
+        ret["olens"] = olens
+        ret["ys"] = ys
+
+        # return (
+        #     before_outs,
+        #     after_outs,
+        #     ds,
+        #     d_outs,
+        #     ilens_,
+        #     olens,
+        #     ys,
+        #     bin_loss,
+        #     log_p_attn,
+        #     olens_reduced,
+        # )
+
+        return ret
 
     def inference(
         self,
@@ -498,12 +645,13 @@ class MASVC(torch.nn.Module):
 
         # setup batch axis
         ilens = torch.tensor([x.shape[0]], dtype=torch.long, device=x.device)
-        xs, ys = x.unsqueeze(0), None
+        xs = x.unsqueeze(0)
         dp_input = dp_input.unsqueeze(0)
         if y is not None:
             ys = y.unsqueeze(0)
             olens = torch.tensor([y.shape[0]], dtype=torch.long, device=y.device)
         else:
+            ys = None
             olens = None
         if spemb is not None:
             spembs = spemb.unsqueeze(0)
@@ -511,16 +659,17 @@ class MASVC(torch.nn.Module):
         if use_teacher_forcing:
             # use groundtruth of duration, pitch, and energy
             ds = d.unsqueeze(0)
-            _, outs, *_ = self._forward(
+            ret = self._forward(
                 xs,
                 ilens,
                 ds=ds,
                 spembs=spembs,
                 dp_inputs=dp_input,
             )  # (1, L, odim)
+            outs = ret["after_outs"]
         else:
             # inference
-            _, outs, ds, d_outs, ilens_, _, log_p_attn, _ = self._forward(
+            ret = self._forward(
                 xs,
                 ilens,
                 ys=ys,
@@ -530,6 +679,11 @@ class MASVC(torch.nn.Module):
                 is_inference=True,
                 alpha=alpha,
             )  # (1, L, odim)
+            outs = ret["after_outs"]
+            ds = ret["ds"]
+            d_outs = ret["d_outs"]
+            ilens_ = ret["ilens"]
+            log_p_attn = ret["log_p_attn"]
 
         # inference without gt
         if ds is None and log_p_attn is None:

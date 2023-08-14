@@ -13,7 +13,7 @@ verbose=1      # verbosity level (lower is less info)
 n_gpus=1       # number of gpus in training
 n_jobs=16      # number of parallel jobs in feature extraction
 
-conf=conf/conformer_fastspeech.v1.yaml
+conf=conf/conf/conformer_fastspeech_flowdp_forwardsum.v1_melmelmel_durloss0_er1_per4.yaml
 
 # dataset configuration
 db_root=../vc1/downloads
@@ -25,9 +25,9 @@ stats_ext=h5
 norm_name=                  # used to specify normalized data.
                             # Ex: `judy` for normalization with pretrained model, `self` for self-normalization
 
-src_feat=ppg_sxliu
+src_feat=mel
 trg_feat=mel
-dp_feat=ppg_sxliu
+dp_feat=mel
 
 # train_duration_dir=/data/group1/z44476r/Experiments/seq2seq-vc/egs/arctic/vc1/exp/clb_slt_932_tts_pt_lr8e-5/results/checkpoint-15000steps/clb_train
 # dev_duration_dir=/data/group1/z44476r/Experiments/seq2seq-vc/egs/arctic/vc1/exp/clb_slt_932_tts_pt_lr8e-5/results/checkpoint-15000steps/clb_dev
@@ -35,8 +35,14 @@ dp_feat=ppg_sxliu
 # dev_duration_dir=/data/group1/z44476r/Experiments/seq2seq-vc/egs/arctic/vc1/exp/clb_slt_932_nopt_r1/results/checkpoint-50000steps/clb_dev
 # train_duration_dir=/data/group1/z44476r/Experiments/seq2seq-vc/egs/arctic/vc1/exp/clb_slt_932_tts_pt_r1/results/checkpoint-35000steps/clb_train
 # dev_duration_dir=/data/group1/z44476r/Experiments/seq2seq-vc/egs/arctic/vc1/exp/clb_slt_932_tts_pt_r1/results/checkpoint-35000steps/clb_dev
-train_duration_dir=/data/group1/z44476r/Experiments/seq2seq-vc/egs/arctic/vc1/exp/clb_slt_932_tts_pt_r4/results/checkpoint-50000steps/clb_train
-dev_duration_dir=/data/group1/z44476r/Experiments/seq2seq-vc/egs/arctic/vc1/exp/clb_slt_932_tts_pt_r4/results/checkpoint-50000steps/clb_dev
+
+# train_duration_dir=/data/group1/z44476r/Experiments/seq2seq-vc/egs/arctic/vc1/exp/clb_slt_932_tts_pt_r4/results/checkpoint-50000steps/clb_train
+# dev_duration_dir=/data/group1/z44476r/Experiments/seq2seq-vc/egs/arctic/vc1/exp/clb_slt_932_tts_pt_r4/results/checkpoint-50000steps/clb_dev
+# train_duration_dir=/data/group1/z44476r/Experiments/seq2seq-vc/egs/arctic/vc1/exp/clb_slt_80_vtn.tts_pt.n80.v1/results/checkpoint-50000steps/clb_train_80
+# dev_duration_dir=/data/group1/z44476r/Experiments/seq2seq-vc/egs/arctic/vc1/exp/clb_slt_80_vtn.tts_pt.n80.v1/results/checkpoint-50000steps/clb_dev
+
+train_duration_dir=none
+dev_duration_dir=none
 
 # pretrained model related
 pretrained_model_checkpoint= #downloads/pretrained_models/ljspeech/transformer_tts_aept/checkpoint-50000steps.pkl
@@ -301,14 +307,71 @@ if [ ${stage} -le 5 ] && [ ${stop_stage} -ge 5 ]; then
 
     [ -z "${checkpoint}" ] && checkpoint="$(ls -dt "${expdir}"/*.pkl | head -1 || true)"
     outdir="${expdir}/results/$(basename "${checkpoint}" .pkl)"
-    for name in "${srcspk}_dev" "${srcspk}_eval"; do
+    for _set in "dev" "eval"; do
+        name="${srcspk}_${_set}"
         echo "Evaluation start. See the progress via ${outdir}/${name}/evaluation.log."
         ${cuda_cmd} --gpu "${n_gpus}" "${outdir}/${name}/evaluation.log" \
             local/evaluate.py \
                 --wavdir "${outdir}/${name}" \
                 --data_root "${db_root}/cmu_us_${trgspk}_arctic" \
                 --trgspk ${trgspk} \
-                --f0_path "conf/f0.yaml"
+                --f0_path "conf/f0.yaml" \
+                --segments "data/${trgspk}_${_set}/segments"
+        grep "Mean MCD" "${outdir}/${name}/evaluation.log"
+    done
+fi
+
+if [ "${stage}" -le 10 ] && [ "${stop_stage}" -ge 10 ]; then
+    echo "Stage 10: Generalization ability test"
+    # shellcheck disable=SC2012
+    [ -z "${checkpoint}" ] && checkpoint="$(ls -dt "${expdir}"/*.pkl | head -1 || true)"
+    outdir="${expdir}/results/$(basename "${checkpoint}" .pkl)"
+    pids=()
+    for _set in "dev" "eval"; do
+    (
+        if [ ${srcspk} == "clb" ]; then
+            name="bdl_${_set}"
+        elif [ ${srcspk} == "bdl" ]; then
+            name="clb_${_set}"
+        fi   
+        [ ! -e "${outdir}/${name}" ] && mkdir -p "${outdir}/${name}"
+        [ "${n_gpus}" -gt 1 ] && n_gpus=1
+        echo "Decoding start. See the progress via ${outdir}/${name}/decode.*.log."
+        CUDA_VISIBLE_DEVICES="" ${cuda_cmd} JOB=1:${n_jobs} --gpu 0 "${outdir}/${name}/decode.JOB.log" \
+            vc_decode.py \
+                --dumpdir "${dumpdir}/${name}/norm_${norm_name}/dump.JOB" \
+                --dp_input_dumpdir "${dumpdir}/${name}/norm_${norm_name}/dump.JOB" \
+                --checkpoint "${checkpoint}" \
+                --src-feat-type "${src_feat}" \
+                --trg-feat-type "${trg_feat}" \
+                --trg-stats "${expdir}/stats.${stats_ext}" \
+                --outdir "${outdir}/${name}/out.JOB" \
+                --verbose "${verbose}"
+        echo "Successfully finished decoding of ${name} set."
+    ) &
+    pids+=($!) # store background pids
+    done
+    i=0; for pid in "${pids[@]}"; do wait ${pid} || ((i++)); done
+    [ ${i} -gt 0 ] && echo "$0: ${i} background jobs are failed." && false
+    echo "Successfully finished decoding."
+
+    echo "Objective Evaluation"
+    [ -z "${checkpoint}" ] && checkpoint="$(ls -dt "${expdir}"/*.pkl | head -1 || true)"
+    outdir="${expdir}/results/$(basename "${checkpoint}" .pkl)"
+    for _set in "dev" "eval"; do
+        if [ ${srcspk} == "clb" ]; then
+            name="bdl_${_set}"
+        elif [ ${srcspk} == "bdl" ]; then
+            name="clb_${_set}"
+        fi   
+        echo "Evaluation start. See the progress via ${outdir}/${name}/evaluation.log."
+        ${cuda_cmd} --gpu "${n_gpus}" "${outdir}/${name}/evaluation.log" \
+            local/evaluate.py \
+                --wavdir "${outdir}/${name}" \
+                --data_root "${db_root}/cmu_us_${trgspk}_arctic" \
+                --trgspk ${trgspk} \
+                --f0_path "conf/f0.yaml" \
+                --segments "data/${trgspk}_${_set}/segments"
         grep "Mean MCD" "${outdir}/${name}/evaluation.log"
     done
 fi

@@ -361,6 +361,7 @@ class ParallelVCMelDataset(Dataset):
         reduction_factor: int = 1,
         return_utt_id=False,
         allow_cache=False,
+        mp=True,
     ):
         """Initialize dataset.
 
@@ -409,27 +410,35 @@ class ParallelVCMelDataset(Dataset):
         self.return_utt_id = return_utt_id
         self.allow_cache = allow_cache
         if allow_cache:
-            # NOTE(kan-bayashi): Manager is need to share memory in dataloader with num_workers > 0
-            self.manager = Manager()
-            self.caches = self.manager.list()
-            self.caches += [() for _ in range(len(self.mel_files))]
+            if mp:
+                # NOTE(kan-bayashi): Manager is need to share memory in dataloader with num_workers > 0
+                self.manager = Manager()
+                self.caches = self.manager.list()
+                self.caches += [() for _ in range(len(self.mel_files))]
+            else:
+                self.caches = [() for _ in range(len(self.mel_files))]
 
-        # load dp input feature files & duration files, and zip with mel_files
-        assert (dp_input_root_dir is not None and durations_dir is not None) or (
-            dp_input_root_dir is None and durations_dir is None
-        )
-        if durations_dir is not None and dp_input_root_dir is not None:
+        # load dp input feature files and zip with mel_files
+        if dp_input_root_dir is not None:
             # find all dp input files
             dp_input_feat_files = sorted(find_files(dp_input_root_dir, dp_input_query))
             assert len(dp_input_feat_files) == len(self.mel_files)
 
+            self.mel_files = [
+                v + [dp_input_feat_files[i]] for i, v in enumerate(self.mel_files)
+            ]
+            self.use_dp_input = True
+        else:
+            self.use_dp_input = False
+
+        # load duration files, and zip with mel_files
+        if durations_dir is not None:
             # find all duration files
             duration_files = sorted(find_files(durations_dir, duration_query))
             assert len(duration_files) == len(self.mel_files)
 
             self.mel_files = [
-                v + [dp_input_feat_files[i], duration_files[i]]
-                for i, v in enumerate(self.mel_files)
+                v + [duration_files[i]] for i, v in enumerate(self.mel_files)
             ]
             self.use_durations = True
             self.reduction_factor = reduction_factor
@@ -454,10 +463,14 @@ class ParallelVCMelDataset(Dataset):
         src_mel = self.src_load_fn(self.mel_files[idx][0])
         trg_mel = self.trg_load_fn(self.mel_files[idx][1])
 
-        if self.use_durations:
+        items = {"src_feat": src_mel, "trg_feat": trg_mel}
+
+        if self.use_dp_input:
             # read dp input feat
             dp_input = self.dp_input_load_fn(self.mel_files[idx][2])
+            items["dp_input"] = dp_input
 
+        if self.use_durations:
             # read durations if exists
             with open(self.mel_files[idx][3], "r") as f:
                 lines = f.read().splitlines()
@@ -467,14 +480,12 @@ class ParallelVCMelDataset(Dataset):
             # force the target to have the same length as the duration sum
             total_length = np.sum(durations) * self.reduction_factor
             trg_mel = trg_mel[:total_length]
+            items["duration"] = durations
 
-        items = {"src_feat": src_mel, "trg_feat": trg_mel}
+        items["trg_feat"] = trg_mel
 
         if self.return_utt_id:
             items["utt_id"] = utt_id
-        if self.use_durations:
-            items["dp_input"] = dp_input
-            items["duration"] = durations
 
         if self.allow_cache:
             self.caches[idx] = items
