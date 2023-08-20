@@ -44,8 +44,11 @@ model_params:
 ###########################################################
 #                      LOSS SETTING                       #
 ###########################################################
-seq2seq_loss_params:
-    bce_pos_weight: 10.0
+trainer_type: ARTTSTrainer
+collater_type: ARTTSCollater
+criterions:
+    "Seq2SeqLoss":
+        bce_pos_weight: 10.0
 
 ###########################################################
 #                   INFERENCE SETTING                     #

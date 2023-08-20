@@ -8,7 +8,7 @@ from scipy.io import wavfile
 from seq2seq_vc.utils.signal import world_extract, extfrm
 
 
-def calculate_mcd_f0(x, y, fs, f0min, f0max):
+def calculate_mcd_f0(x, y, fs, f0min, f0max, calculate_gv=False):
     """
     x and y must be in range [-1, 1]
     """
@@ -61,4 +61,19 @@ def calculate_mcd_f0(x, y, fs, f0min, f0max):
     y_trim, _ = librosa.effects.trim(y=y)
     ddur = float(abs(len(x_trim) - len(y_trim)) / fs)
 
-    return mcd, f0rmse, f0corr, ddur
+    ret = {
+        "MCD": mcd,
+        "F0RMSE": f0rmse,
+        "F0CORR": f0corr,
+        "DDUR": ddur
+    }
+
+    # GV
+    if calculate_gv:
+        # (1) take var along time axis (2) take log (3) take abs (4) take mean
+        gv = np.mean(np.abs(np.log(np.var(cvt_mcep_nonsil_pow, axis=0))))
+        ret["GV"] = gv
+
+    return ret
+    
+    

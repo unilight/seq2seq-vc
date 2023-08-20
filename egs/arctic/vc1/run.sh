@@ -24,7 +24,7 @@ num_train=932
 stats_ext=h5
 norm_name=                  # used to specify normalized data.
                             # Ex: `judy` for normalization with pretrained model, `self` for self-normalization
-src_feat=ppg_sxliu
+src_feat=mel
 trg_feat=mel
 
 # pretrained model related
@@ -42,6 +42,9 @@ resume=""  # checkpoint path to resume training
 checkpoint=""               # checkpoint path to be used for decoding
                             # if not provided, the latest one will be used
                             # (e.g. <path>/<to>/checkpoint-400000steps.pkl)
+
+# evaluation related setting
+gv=False
                                        
 # shellcheck disable=SC1091
 . utils/parse_options.sh || exit 1;
@@ -240,8 +243,10 @@ if [ "${stage}" -le 3 ] && [ "${stop_stage}" -ge 3 ]; then
                 --additional-config "${conf}" \
                 --src-train-dumpdir "${dumpdir}/${srcspk}_train_${num_train}/norm_${norm_name}" \
                 --src-dev-dumpdir "${dumpdir}/${srcspk}_dev/norm_${norm_name}" \
+                --src-feat-type "${src_feat}" \
                 --trg-train-dumpdir "${dumpdir}/${trgspk}_train_${num_train}/norm_${norm_name}" \
                 --trg-dev-dumpdir "${dumpdir}/${trgspk}_dev/norm_${norm_name}" \
+                --trg-feat-type "${trg_feat}" \
                 --trg-stats "${expdir}/stats.${stats_ext}" \
                 --init-checkpoint "${expdir}/original_${pretrained_model_checkpoint_name}.pkl" \
                 --outdir "${expdir}" \
@@ -301,14 +306,17 @@ if [ ${stage} -le 5 ] && [ ${stop_stage} -ge 5 ]; then
 
     [ -z "${checkpoint}" ] && checkpoint="$(ls -dt "${expdir}"/*.pkl | head -1 || true)"
     outdir="${expdir}/results/$(basename "${checkpoint}" .pkl)"
-    for name in "${srcspk}_dev" "${srcspk}_eval"; do
+    for _set in "dev" "eval"; do
+        name="${srcspk}_${_set}"
         echo "Evaluation start. See the progress via ${outdir}/${name}/evaluation.log."
         ${cuda_cmd} --gpu "${n_gpus}" "${outdir}/${name}/evaluation.log" \
             local/evaluate.py \
                 --wavdir "${outdir}/${name}" \
                 --data_root "${db_root}/cmu_us_${trgspk}_arctic" \
                 --trgspk ${trgspk} \
-                --f0_path "conf/f0.yaml"
+                --f0_path "conf/f0.yaml" \
+                --segments "data/${trgspk}_${_set}/segments" \
+                --gv ${gv}
         grep "Mean MCD" "${outdir}/${name}/evaluation.log"
     done
 fi
@@ -319,7 +327,7 @@ if [ "${stage}" -le 6 ] && [ "${stop_stage}" -ge 6 ]; then
     [ -z "${checkpoint}" ] && checkpoint="$(ls -dt "${expdir}"/*.pkl | head -1 || true)"
     outdir="${expdir}/results/$(basename "${checkpoint}" .pkl)"
     pids=()
-    for name in "train" "dev"; do
+    for name in "train_${num_train}" "dev"; do
     (
         [ ! -e "${outdir}/${srcspk}_${name}" ] && mkdir -p "${outdir}/${srcspk}_${name}"
         [ "${n_gpus}" -gt 1 ] && n_gpus=1
@@ -328,6 +336,8 @@ if [ "${stage}" -le 6 ] && [ "${stop_stage}" -ge 6 ]; then
             vc_decode.py \
                 --dumpdir "${dumpdir}/${srcspk}_${name}/norm_${norm_name}/dump.JOB" \
                 --checkpoint "${checkpoint}" \
+                --src-feat-type "${src_feat}" \
+                --trg-feat-type "${trg_feat}" \
                 --trg-stats "${expdir}/stats.${stats_ext}" \
                 --outdir "${outdir}/${srcspk}_${name}/out.JOB" \
                 --verbose "${verbose}" \

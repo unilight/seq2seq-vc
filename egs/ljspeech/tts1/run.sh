@@ -19,6 +19,7 @@ conf=conf/transformer_tts.v1.yaml
 db_root=downloads
 dumpdir=dump                # directory to dump full features
 stats_ext=h5
+trg_feat="encodec"
 
 # pretrained model related
 pretrained_model=           # available pretrained models: m_ailabs.judy.vtn_tts_pt
@@ -48,6 +49,7 @@ g2p=g2p_en       # g2p method (needed if token_type=phn).
 lang=noinfo      # The language type of corpus.
 
 # TTS autoencoder pretraining setting
+tts_aept_src_feat="mel"
 tts_aept_checkpoint=
 tts_aept_config=conf/tts_aept.v1.yaml
 tts_aept_exptag=
@@ -109,12 +111,13 @@ if [ "${stage}" -le 1 ] && [ "${stop_stage}" -ge 1 ]; then
     echo "Successfully finished feature extraction."
 
     # calculate statistics for normalization
-    echo "Statistics computation start. See the progress via ${dumpdir}/${train_set}/compute_statistics.log."
-    ${train_cmd} "${dumpdir}/${train_set}/compute_statistics.log" \
+    echo "Statistics computation start. See the progress via ${dumpdir}/${train_set}/compute_statistics_${trg_feat}.log."
+    ${train_cmd} "${dumpdir}/${train_set}/compute_statistics_${trg_feat}.log" \
         compute_statistics.py \
             --config "${conf}" \
             --rootdir "${dumpdir}/${train_set}/raw" \
             --dumpdir "${dumpdir}/${train_set}" \
+            --feat_type "${trg_feat}" \
             --verbose "${verbose}"
     echo "Successfully finished calculation of statistics."
 
@@ -123,14 +126,15 @@ if [ "${stage}" -le 1 ] && [ "${stop_stage}" -ge 1 ]; then
     for name in "${train_set}" "${dev_set}" "${eval_set}"; do
     (
         [ ! -e "${dumpdir}/${name}/norm" ] && mkdir -p "${dumpdir}/${name}/norm"
-        echo "Nomalization start. See the progress via ${dumpdir}/${name}/norm/normalize.*.log."
-        ${train_cmd} JOB=1:${n_jobs} "${dumpdir}/${name}/norm/normalize.JOB.log" \
+        echo "Nomalization start. See the progress via ${dumpdir}/${name}/norm/normalize_${trg_feat}.*.log."
+        ${train_cmd} JOB=1:${n_jobs} "${dumpdir}/${name}/norm/normalize_${trg_feat}.JOB.log" \
             normalize.py \
                 --config "${conf}" \
                 --stats "${dumpdir}/${train_set}/stats.${stats_ext}" \
                 --rootdir "${dumpdir}/${name}/raw/dump.JOB" \
                 --dumpdir "${dumpdir}/${name}/norm/dump.JOB" \
                 --verbose "${verbose}" \
+                --feat_type "${trg_feat}" \
                 --skip-wav-copy
         echo "Successfully finished normalization of ${name} set."
     ) &
@@ -189,6 +193,7 @@ if [ "${stage}" -le 3 ] && [ "${stop_stage}" -ge 3 ]; then
             --g2p "${g2p}" \
             --token-list "${expdir}/tokens.txt" \
             --token-type "${token_type}" \
+            --feat-type "${trg_feat}" \
             --outdir "${expdir}" \
             --resume "${resume}" \
             --verbose "${verbose}"
@@ -212,6 +217,7 @@ if [ "${stage}" -le 4 ] && [ "${stop_stage}" -ge 4 ]; then
                 --checkpoint "${checkpoint}" \
                 --stats "${expdir}/stats.${stats_ext}" \
                 --token-list "${expdir}/tokens.txt" \
+                --feat-type "${trg_feat}" \
                 --outdir "${outdir}/${name}" \
                 --verbose "${verbose}"
         echo "Successfully finished decoding of ${name} set."
@@ -267,9 +273,11 @@ if [ "${stage}" -le 6 ] && [ "${stop_stage}" -ge 6 ]; then
             --additional-config "${tts_aept_config}" \
             --src-train-dumpdir "${dumpdir}/${train_set}/norm" \
             --src-dev-dumpdir "${dumpdir}/${dev_set}/norm" \
+            --src-feat-type "${tts_aept_src_feat}" \
             --trg-train-dumpdir "${dumpdir}/${train_set}/norm" \
             --trg-dev-dumpdir "${dumpdir}/${dev_set}/norm" \
             --trg-stats "${tts_aept_expdir}/stats.${stats_ext}" \
+            --trg-feat-type "${trg_feat}" \
             --init-checkpoint "${tts_aept_expdir}/original_${tts_aept_checkpoint_name}.pkl" \
             --outdir "${tts_aept_expdir}" \
             --resume "${resume}" \

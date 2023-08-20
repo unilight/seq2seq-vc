@@ -17,6 +17,7 @@ from tqdm import tqdm
 import yaml
 
 from seq2seq_vc.utils import find_files
+from seq2seq_vc.utils.types import str2bool
 from seq2seq_vc.evaluate.dtw_based import calculate_mcd_f0
 from seq2seq_vc.evaluate.asr import load_asr_model, transcribe, calculate_measures
 
@@ -58,7 +59,7 @@ def _calculate_asr_score(model, device, file_list, groundtruths):
 
     return ers, cer, wer
 
-def _calculate_mcd_f0(file_list, gt_root, segments, trgspk, f0min, f0max, results):
+def _calculate_mcd_f0(file_list, gt_root, segments, trgspk, f0min, f0max, results, gv=False):
     for i, cvt_wav_path in enumerate(file_list):
         basename = get_basename(cvt_wav_path)
         
@@ -78,9 +79,9 @@ def _calculate_mcd_f0(file_list, gt_root, segments, trgspk, f0min, f0max, result
             cvt_wav = torchaudio.transforms.Resample(cvt_fs, gt_fs)(torch.from_numpy(cvt_wav)).numpy()
 
         # calculate MCD, F0RMSE, F0CORR and DDUR
-        mcd, f0rmse, f0corr, ddur = calculate_mcd_f0(cvt_wav, gt_wav, gt_fs, f0min, f0max)
+        res = calculate_mcd_f0(cvt_wav, gt_wav, gt_fs, f0min, f0max, calculate_gv=gv)
 
-        results.append([basename, mcd, f0rmse, f0corr, ddur])
+        results.append([basename, res])
 
 def get_parser():
     parser = argparse.ArgumentParser(description="objective evaluation script.")
@@ -90,6 +91,7 @@ def get_parser():
     parser.add_argument("--segments", type=str, default=None, help="segments file")
     parser.add_argument("--f0_path", required=True, type=str, help="yaml file storing f0 ranges")
     parser.add_argument("--n_jobs", default=10, type=int, help="number of parallel jobs")
+    parser.add_argument("--gv", default=False, type=str2bool, help="calculate GV or not")
     return parser
 
 
@@ -153,7 +155,7 @@ def main():
         for f in file_lists:
             p = mp.Process(
                 target=_calculate_mcd_f0,
-                args=(f, gt_root, segments, trgspk, f0min, f0max, results),
+                args=(f, gt_root, segments, trgspk, f0min, f0max, results, args.gv),
             )
             p.start()
             processes.append(p)
@@ -162,30 +164,54 @@ def main():
         for p in processes:
             p.join()
 
-        results = sorted(results, key=lambda x:x[0])
-        results = [result + ers[result[0]] for result in results] 
+        sorted_results = sorted(results, key=lambda x:x[0])
+        results = []
+        for result in sorted_results:
+            d = {k: v for k, v in result[1].items()}
+            d["basename"] = result[0]
+            d["CER"] = ers[result[0]][0]
+            d["WER"] = ers[result[0]][1]
+            d["GT_TRANSCRIPTION"] = ers[result[0]][2]
+            d["CV_TRANSCRIPTION"] = ers[result[0]][3]
+            results.append(d)
         
     # utterance wise result
     for result in results:
         print(
-            "{} {:.2f} {:.2f} {:.2f} {:.2f} {:.1f} {:.1f} \t{} | {}\n".format(
-                *result
+            "{} {:.2f} {:.2f} {:.2f} {:.2f} {:.1f} {:.1f} \t{} | {}".format(
+                result["basename"],
+                result["MCD"],
+                result["F0RMSE"],
+                result["F0CORR"],
+                result["DDUR"],
+                result["CER"],
+                result["WER"],
+                result["GT_TRANSCRIPTION"],
+                result["CV_TRANSCRIPTION"],
             )
         )
 
     # average result
-    mMCD = np.mean(np.array([result[1] for result in results]))
-    mf0RMSE = np.mean(np.array([result[2] for result in results]))
-    mf0CORR = np.mean(np.array([result[3] for result in results]))
-    mDDUR = np.mean(np.array([result[4] for result in results]))
+    mMCD = np.mean(np.array([result["MCD"] for result in results]))
+    mf0RMSE = np.mean(np.array([result["F0RMSE"] for result in results]))
+    mf0CORR = np.mean(np.array([result["F0CORR"] for result in results]))
+    mDDUR = np.mean(np.array([result["DDUR"] for result in results]))
     mCER = cer 
     mWER = wer
 
-    print(
-        "Mean MCD, f0RMSE, f0CORR, DDUR, CER, WER: {:.2f} {:.2f} {:.3f} {:.3f} {:.1f} {:.1f}".format(
-            mMCD, mf0RMSE, mf0CORR, mDDUR, mCER, mWER
+    if not args.gv:
+        print(
+            "Mean MCD, f0RMSE, f0CORR, DDUR, CER, WER: {:.2f} {:.2f} {:.3f} {:.3f} {:.1f} {:.1f}".format(
+                mMCD, mf0RMSE, mf0CORR, mDDUR, mCER, mWER
+            )
         )
-    )
+    else:
+        mGV = np.mean(np.array([result["GV"] for result in results]))
+        print(
+            "Mean MCD, GV, f0RMSE, f0CORR, DDUR, CER, WER: {:.2f} {:.3f} {:.2f} {:.3f} {:.3f} {:.1f} {:.1f}".format(
+                mMCD, mGV, mf0RMSE, mf0CORR, mDDUR, mCER, mWER
+            )
+        )
 
 
 if __name__ == "__main__":

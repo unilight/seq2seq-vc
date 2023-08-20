@@ -56,6 +56,9 @@ resume=""  # checkpoint path to resume training
 checkpoint=""               # checkpoint path to be used for decoding
                             # if not provided, the latest one will be used
                             # (e.g. <path>/<to>/checkpoint-400000steps.pkl)
+
+# evaluation related setting
+gv=False
                                        
 # shellcheck disable=SC1091
 . utils/parse_options.sh || exit 1;
@@ -316,7 +319,8 @@ if [ ${stage} -le 5 ] && [ ${stop_stage} -ge 5 ]; then
                 --data_root "${db_root}/cmu_us_${trgspk}_arctic" \
                 --trgspk ${trgspk} \
                 --f0_path "conf/f0.yaml" \
-                --segments "data/${trgspk}_${_set}/segments"
+                --segments "data/${trgspk}_${_set}/segments" \
+                --gv ${gv}
         grep "Mean MCD" "${outdir}/${name}/evaluation.log"
     done
 fi

@@ -57,7 +57,7 @@ def main():
     parser.add_argument(
         "--feat_type",
         type=str,
-        default="feats",
+        default="mel",
         help=("feature type. this is used as key name to read h5 feature files. "),
     )
     parser.add_argument(
