@@ -68,9 +68,9 @@ if [ ${stage} -le -1 ] && [ ${stop_stage} -ge -1 ]; then
     ../../arctic/vc1/local/data_download.sh ${arctic_db_root} ${trgspk}
 
     # download pretrained vocoder
-    utils/hf_download.py --repo_id "unilight/accent-conversion-2023" --outdir "downloads" --filename "pwg_bdl/checkpoint-400000steps.pkl"
-    utils/hf_download.py --repo_id "unilight/accent-conversion-2023" --outdir "downloads" --filename "pwg_bdl/config.yml"
-    utils/hf_download.py --repo_id "unilight/accent-conversion-2023" --outdir "downloads" --filename "pwg_bdl/stats.h5"
+    utils/hf_download.py --repo_id "unilight/accent-conversion-2023" --outdir "downloads" --filename "pwg_TXHC/checkpoint-400000steps.pkl"
+    utils/hf_download.py --repo_id "unilight/accent-conversion-2023" --outdir "downloads" --filename "pwg_TXHC/config.yml"
+    utils/hf_download.py --repo_id "unilight/accent-conversion-2023" --outdir "downloads" --filename "pwg_TXHC/stats.h5"
 
     # download npvc model
     utils/hf_download.py --repo_id "unilight/accent-conversion-2023" --outdir "downloads" --filename "s3prl-vc-ppg_sxliu/checkpoint-50000steps.pkl"
@@ -95,7 +95,7 @@ if [ ${stage} -le 0 ] && [ ${stop_stage} -ge 0 ]; then
         "${arctic_db_root}/cmu_us_${trgspk}_arctic" "${trgspk}" data
 
     echo "Preparing source speaker ${srcspk}"
-    local/data_prep.sh \
+    ../cascade/local/data_prep.sh \
         --train_set "${srcspk}_train_${num_train}" \
         --dev_set "${srcspk}_dev" \
         --eval_set "${srcspk}_eval" \
@@ -105,7 +105,50 @@ if [ ${stage} -le 0 ] && [ ${stop_stage} -ge 0 ]; then
 fi
 
 if [ "${stage}" -le 1 ] && [ "${stop_stage}" -ge 1 ]; then
-    echo "Stage 1: Feature extraction"
+    echo "Stage 1: Synthetic target generation"
+
+    npvc_pretrained_model_dir=$(dirname ${npvc_checkpoint})
+    npvc_stats="${npvc_pretrained_model_dir}/stats.h5"
+    echo "NPVC pretrained model checkpoint: ${npvc_checkpoint}"
+
+    for name in "dev" "eval" "train_${num_train}"; do
+        new_name=${trgspk}2${srcspk}_${npvc_name}_${name}
+        [ ! -e "data/${new_name}/wav" ] && mkdir -p "data/${new_name}/wav"
+        echo "Decoding start. See the progress via data/${new_name}/decode.log."
+        ${cuda_cmd} --gpu "${n_gpus}" "data/${new_name}/decode.log" \
+            s3prl-vc-decode \
+                --scp "data/${trgspk}_${name}/wav.scp" \
+                --checkpoint "${npvc_checkpoint}" \
+                --trg-stats "${npvc_stats}" \
+                --outdir "data/${new_name}" \
+                --verbose "${verbose}"
+
+        echo "Evaluation start. See the progress via data/${new_name}/evaluation.log."
+        ${cuda_cmd} --gpu "${n_gpus}" "data/${new_name}/evaluation.log" \
+            ../cascade/local/evaluate.py \
+                --wavdir "data/${new_name}" \
+                --data_root "${arctic_db_root}/cmu_us_${trgspk}_arctic" \
+                --trgspk ${trgspk} \
+                --f0_path "conf/f0.yaml" \
+                --asr
+
+        echo "Making scp. See results: data/${new_name}/wav.scp"
+        [ -e "data/${new_name}/wav.scp" ] && rm "data/${new_name}/wav.scp"
+        find "$(realpath data/${new_name})" -name "*.wav" -follow | sort | while read -r filename; do
+            id="$(basename "${filename}" | sed -e "s/\.[^\.]*$//g")"
+            echo "${id} ${filename}" >> "data/${new_name}/wav.scp"
+        done
+
+        cp "data/${trgspk}_${name}/segments" "data/${new_name}"
+
+        # copy generated feats to dump/<name>/raw_from_vc_model
+        [ ! -e "${dumpdir}/${new_name}/raw_from_vc_model" ] && mkdir -p "${dumpdir}/${new_name}/raw_from_vc_model"
+        cp data/${new_name}/mel/*.h5 "${dumpdir}/${new_name}/raw_from_vc_model/"
+    done
+fi
+
+if [ "${stage}" -le 2 ] && [ "${stop_stage}" -ge 2 ]; then
+    echo "Stage 2: Feature extraction"
 
     # if norm_name=self, then use $conf; else use config in pretrained_model_dir
     if [ ${norm_name} == "self" ]; then
@@ -116,7 +159,7 @@ if [ "${stage}" -le 1 ] && [ "${stop_stage}" -ge 1 ]; then
 
     # extract raw features
     pids=()
-    for name in "${srcspk}_train_${num_train}" "${srcspk}_dev" "${srcspk}_eval" "${trgspk}_train_${num_train}" "${trgspk}_dev" "${trgspk}_eval"; do
+    for name in "${srcspk}_train_${num_train}" "${srcspk}_dev" "${srcspk}_eval" "${trgspk}2${srcspk}_${npvc_name}_train_${num_train}" "${trgspk}2${srcspk}_${npvc_name}_dev" "${trgspk}2${srcspk}_${npvc_name}_eval"; do
     (
         [ ! -e "${dumpdir}/${name}/raw" ] && mkdir -p "${dumpdir}/${name}/raw"
         echo "Feature extraction start. See the progress via ${dumpdir}/${name}/raw/preprocessing.*.log."
@@ -137,8 +180,8 @@ if [ "${stage}" -le 1 ] && [ "${stop_stage}" -ge 1 ]; then
     echo "Successfully finished feature extraction."
 fi
 
-if [ "${stage}" -le 2 ] && [ "${stop_stage}" -ge 2 ]; then
-    echo "Stage 2: Statistics computation (optional) and normalization"
+if [ "${stage}" -le 3 ] && [ "${stop_stage}" -ge 3 ]; then
+    echo "Stage 3: Statistics computation (optional) and normalization"
 
     if [ ${norm_name} == "self" ]; then
         # calculate statistics for normalization
@@ -167,7 +210,7 @@ if [ "${stage}" -le 2 ] && [ "${stop_stage}" -ge 2 ]; then
     fi
 
     # normalize and dump them
-    for spk in ${srcspk} ${trgspk}; do
+    for spk in ${srcspk} ${trgspk}2${srcspk}_${npvc_name}; do
         pids=()
         for name in "${spk}_train_${num_train}" "${spk}_dev" "${spk}_eval"; do
         (
@@ -190,17 +233,39 @@ if [ "${stage}" -le 2 ] && [ "${stop_stage}" -ge 2 ]; then
         [ "${i}" -gt 0 ] && echo "$0: ${i} background jobs are failed." && exit 1;
         echo "Successfully finished ${spk} side normalization."
     done
+
+    # normalize feats from VC model directly
+    for name in "${trgspk}2${srcspk}_${npvc_name}_train_${num_train}" "${trgspk}2${srcspk}_${npvc_name}_dev" "${trgspk}2${srcspk}_${npvc_name}_eval"; do
+    (
+        [ ! -e "${dumpdir}/${name}/norm_${norm_name}_from_vc_model" ] && mkdir -p "${dumpdir}/${name}/norm_${norm_name}_from_vc_model"
+        echo "Nomalization start. See the progress via ${dumpdir}/${name}/norm_${norm_name}_from_vc_model/normalize.*.log."
+        ${train_cmd} "${dumpdir}/${name}/norm_${norm_name}_from_vc_model/normalize.log" \
+            normalize.py \
+                --config "${config_for_feature_extraction}" \
+                --stats "${stats}" \
+                --rootdir "${dumpdir}/${name}/raw_from_vc_model" \
+                --dumpdir "${dumpdir}/${name}/norm_${norm_name}_from_vc_model" \
+                --verbose "${verbose}" \
+                --feat_type "${feat_type}" \
+                --skip-wav-copy
+        echo "Successfully finished normalization of ${name} set."
+    ) &
+    pids+=($!)
+    done
+    i=0; for pid in "${pids[@]}"; do wait "${pid}" || ((++i)); done
+    [ "${i}" -gt 0 ] && echo "$0: ${i} background jobs are failed." && exit 1;
+    echo "Successfully finished ${spk} side normalization."
 fi
 
 
 if [ -z ${tag} ]; then
-    expname=${srcspk}_${trgspk}_${num_train}_$(basename ${conf%.*})
+    expname=${srcspk}_${trgspk}2${srcspk}_${npvc_name}_${num_train}_$(basename ${conf%.*})
 else
-    expname=${srcspk}_${trgspk}_${num_train}_${tag}
+    expname=${srcspk}_${trgspk}2${srcspk}_${npvc_name}_${num_train}_${tag}
 fi
 expdir=exp/${expname}
-if [ "${stage}" -le 3 ] && [ "${stop_stage}" -ge 3 ]; then
-    echo "Stage 3: Network training"
+if [ "${stage}" -le 4 ] && [ "${stop_stage}" -ge 4 ]; then
+    echo "Stage 4: Network training"
 
     [ ! -e "${expdir}" ] && mkdir -p "${expdir}"
     if [ "${n_gpus}" -gt 1 ]; then
@@ -221,8 +286,8 @@ if [ "${stage}" -le 3 ] && [ "${stop_stage}" -ge 3 ]; then
                 --src-train-dumpdir "${dumpdir}/${srcspk}_train_${num_train}/norm_${norm_name}" \
                 --src-dev-dumpdir "${dumpdir}/${srcspk}_dev/norm_${norm_name}" \
                 --src-feat-type "${feat_type}" \
-                --trg-train-dumpdir "${dumpdir}/${trgspk}_train_${num_train}/norm_${norm_name}" \
-                --trg-dev-dumpdir "${dumpdir}/${trgspk}_dev/norm_${norm_name}" \
+                --trg-train-dumpdir "${dumpdir}/${trgspk}2${srcspk}_${npvc_name}_train_${num_train}/norm_${norm_name}" \
+                --trg-dev-dumpdir "${dumpdir}/${trgspk}2${srcspk}_${npvc_name}_dev/norm_${norm_name}" \
                 --trg-stats "${expdir}/stats.${stats_ext}" \
                 --trg-feat-type "${feat_type}" \
                 --init-checkpoint "${expdir}/original_${pretrained_model_checkpoint_name}.pkl" \
@@ -235,8 +300,8 @@ if [ "${stage}" -le 3 ] && [ "${stop_stage}" -ge 3 ]; then
     echo "Successfully finished training."
 fi
 
-if [ "${stage}" -le 4 ] && [ "${stop_stage}" -ge 4 ]; then
-    echo "Stage 4: Network decoding"
+if [ "${stage}" -le 5 ] && [ "${stop_stage}" -ge 5 ]; then
+    echo "Stage 5: Network decoding"
     # shellcheck disable=SC2012
     [ -z "${checkpoint}" ] && checkpoint="$(ls -dt "${expdir}"/*.pkl | head -1 || true)"
     outdir="${expdir}/results/$(basename "${checkpoint}" .pkl)"
@@ -264,101 +329,20 @@ if [ "${stage}" -le 4 ] && [ "${stop_stage}" -ge 4 ]; then
     echo "Successfully finished decoding."
 fi
 
-if [ ${stage} -le 5 ] && [ ${stop_stage} -ge 5 ]; then
-    echo "stage 5: Objective Evaluation"
+if [ ${stage} -le 6 ] && [ ${stop_stage} -ge 6 ]; then
+    echo "stage 6: Objective Evaluation"
 
     [ -z "${checkpoint}" ] && checkpoint="$(ls -dt "${expdir}"/*.pkl | head -1 || true)"
     outdir="${expdir}/results/$(basename "${checkpoint}" .pkl)"
     for name in "${srcspk}_dev" "${srcspk}_eval"; do
         echo "Evaluation start. See the progress via ${outdir}/${name}/evaluation.log."
         ${cuda_cmd} --gpu "${n_gpus}" "${outdir}/${name}/evaluation.log" \
-            local/evaluate.py \
+            ../cascade/local/evaluate.py \
                 --wavdir "${outdir}/${name}" \
-                --data_root "${arctic_db_root}/cmu_us_${trgspk}_arctic" \
-                --trgspk ${trgspk} \
-                --f0_path "conf/f0.yaml" \
-                --asr --mcd
-        grep "Mean MCD" "${outdir}/${name}/evaluation.log"
-        grep "Mean CER" "${outdir}/${name}/evaluation.log"
-    done
-fi
-
-
-
-if [ "${stage}" -le 6 ] && [ "${stop_stage}" -ge 6 ]; then
-    echo "Stage 6: Stage 2 decoding"
-    # shellcheck disable=SC2012
-    [ -z "${checkpoint}" ] && checkpoint="$(ls -dt "${expdir}"/*.pkl | head -1 || true)"
-    outdir="${expdir}/results/$(basename "${checkpoint}" .pkl)"
-
-    npvc_pretrained_model_dir=$(dirname ${npvc_checkpoint})
-    npvc_stats="${npvc_pretrained_model_dir}/stats.h5"
-    echo "NPVC pretrained model checkpoint: ${npvc_checkpoint}"
-
-    pids=()
-    for name in "${srcspk}_dev" "${srcspk}_eval"; do
-    (
-        new_name="stage2_${npvc_name}_$(basename "${npvc_checkpoint}" .pkl)_${name}"
-        [ ! -e "${outdir}/${new_name}" ] && mkdir -p "${outdir}/${new_name}"
-        [ "${n_gpus}" -gt 1 ] && n_gpus=1
-        echo "Decoding start. See the progress via ${outdir}/${new_name}/decode.*.log."
-        ${cuda_cmd} --gpu "${n_gpus}" "${outdir}/${new_name}/decode.log" \
-            s3prl-vc-decode \
-                --wavdir "${outdir}/${name}" \
-                --checkpoint "${npvc_checkpoint}" \
-                --trg-stats "${npvc_stats}" \
-                --outdir "${outdir}/${new_name}/" \
-                --verbose "${verbose}"
-        echo "Successfully finished decoding of ${name} set."
-    ) &
-    pids+=($!) # store background pids
-    done
-    i=0; for pid in "${pids[@]}"; do wait ${pid} || ((i++)); done
-    [ ${i} -gt 0 ] && echo "$0: ${i} background jobs are failed." && false
-    echo "Successfully finished decoding."
-fi
-
-if [ ${stage} -le 7 ] && [ ${stop_stage} -ge 7 ]; then
-    echo "stage 7: Stage 2 Objective Evaluation"
-
-    [ -z "${checkpoint}" ] && checkpoint="$(ls -dt "${expdir}"/*.pkl | head -1 || true)"
-    outdir="${expdir}/results/$(basename "${checkpoint}" .pkl)"
-    for name in "${srcspk}_dev" "${srcspk}_eval"; do
-        new_name="stage2_${npvc_name}_$(basename "${npvc_checkpoint}" .pkl)_${name}"
-        echo "Evaluation start. See the progress via ${outdir}/${new_name}/evaluation.log."
-        ${cuda_cmd} --gpu "${n_gpus}" "${outdir}/${new_name}/evaluation.log" \
-            local/evaluate.py \
-                --wavdir "${outdir}/${new_name}" \
                 --data_root "${arctic_db_root}/cmu_us_${trgspk}_arctic" \
                 --trgspk ${trgspk} \
                 --f0_path "conf/f0.yaml" \
                 --asr
-        grep "Mean CER" "${outdir}/${new_name}/evaluation.log"
+        grep "Mean CER" "${outdir}/${name}/evaluation.log"
     done
-fi
-
-################################################################################
-###################################  LEGACY  ###################################
-################################################################################
-
-if [ ${stage} -le 10 ] && [ ${stop_stage} -ge 10 ]; then
-    echo "stage 10: Ground Truth Objective Evaluation"
-
-    echo "Evaluation start. See the progress via ${srcspk}_gt_evaluation.log."
-    ${cuda_cmd} --gpu "${n_gpus}" "${srcspk}_gt_evaluation.log" \
-        local/gt_evaluate.py \
-            --wavdir "${db_root}/${srcspk}/wav" \
-            --data_root "${arctic_db_root}/cmu_us_${trgspk}_arctic" \
-            --trgspk ${trgspk} \
-            --f0_path "conf/f0.yaml"
-    grep "CER:" "${srcspk}_gt_evaluation.log"
-
-    echo "Evaluation start. See the progress via ${trgspk}_gt_evaluation.log."
-    ${cuda_cmd} --gpu "${n_gpus}" "${trgspk}_gt_evaluation.log" \
-        local/gt_evaluate.py \
-            --wavdir "${arctic_db_root}/cmu_us_${trgspk}_arctic/wav" \
-            --data_root "${arctic_db_root}/cmu_us_${trgspk}_arctic" \
-            --trgspk ${trgspk} \
-            --f0_path "conf/f0.yaml"
-    grep "CER:" "${trgspk}_gt_evaluation.log"
 fi
