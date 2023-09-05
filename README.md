@@ -4,6 +4,9 @@ Paper (INTERSPEECH2020) [![arXiv](https://img.shields.io/badge/arXiv-1912.06183-
 Paper (IEEE/ACM TASLP)  [![arXiv](https://img.shields.io/badge/arXiv-2008.03088-b31b1b.svg)](https://arxiv.org/abs/2008.03088)  
 Original codebase on ESPNet [![GitHub](https://img.shields.io/badge/github-%23121011.svg?style=for-the-badge&logo=github&logoColor=white)](https://github.com/espnet/espnet/tree/master/egs/arctic/vc1)  
 
+## News
+
+- **2023.09.: We released a recipe for foreign accent conversion! Please refer to `egs/l2-arctic` for details.**
 
 ## Introduction and motivation
 

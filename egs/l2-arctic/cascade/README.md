@@ -1,6 +1,6 @@
 # Cascade method for foreign accent conversion on the L2-ARCTIC and ARCTIC datasets
 
-There are two stages in the cascade method.
+There are two stages during **inference** in the cascade method.
 - The first stage is the seq2seq mapping
 - The second stage is speaker identity restoration with a non-parallel frame-based model.
 
