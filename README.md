@@ -1,6 +1,6 @@
 # seq2seq-vc: sequence-to-sequence voice conversion toolkit
 
-Paper (INTERSPEECH2020) [![arXiv](https://img.shields.io/badge/arXiv-1912.06183-b31b1b.svg)](https://arxiv.org/abs/1912.06183)  
+Paper (INTERSPEECH2020) [![arXiv](https://img.shields.io/badge/arXiv-1912.06813-b31b1b.svg)](https://arxiv.org/abs/1912.06813)  
 Paper (IEEE/ACM TASLP)  [![arXiv](https://img.shields.io/badge/arXiv-2008.03088-b31b1b.svg)](https://arxiv.org/abs/2008.03088)  
 Original codebase on ESPNet [![GitHub](https://img.shields.io/badge/github-%23121011.svg?style=for-the-badge&logo=github&logoColor=white)](https://github.com/espnet/espnet/tree/master/egs/arctic/vc1)  
 
@@ -12,7 +12,7 @@ Original codebase on ESPNet [![GitHub](https://img.shields.io/badge/github-%2312
 
 Sequence-to-sequence (seq2seq) modeling is especially attractive to voice conversion (VC) owing to their ability to convert prosody. In particular, this repository aim to reproduce the results of the following papers/models.
 
-### Voice Transformer Network (VTN) ([paper](https://arxiv.org/abs/1912.06183))
+### Voice Transformer Network (VTN) ([paper](https://arxiv.org/abs/1912.06813))
 This is the first paper that applies the Transformer model to VC. In addition to the model architecture itself, the true novelty of this paper is actually a pre-training technique based on text-to-speech (TTS). This repository provides recipes for (1) TTS pre-training and (2) fine-tuning on a VC dataset. That is to say, TTS is also available in this repository.
 
 Originally I open-sourced the code on [ESPNet](https://github.com/espnet/espnet), but as it grows bigger and bigger, it becomes harder to conduct scientific research on ESPNet. Therefore, this repository aims to isolate the seq2seq VC part from ESPNet to become an independently-maintained toolkit (hopefully).
