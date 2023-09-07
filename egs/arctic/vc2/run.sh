@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Copyright 2022 Wen-Chin Huang (Nagoya University)
+# Copyright 2023 Wen-Chin Huang (Nagoya University)
 #  MIT License (https://opensource.org/licenses/MIT)
 
 . ./path.sh || exit 1;
@@ -13,7 +13,7 @@ verbose=1      # verbosity level (lower is less info)
 n_gpus=1       # number of gpus in training
 n_jobs=16      # number of parallel jobs in feature extraction
 
-conf=conf/conf/conformer_fastspeech_flowdp_forwardsum.v1_melmelmel_durloss0_er1_per4.yaml
+conf=conf/aas_vc.melmelmel.v1.yaml
 
 # dataset configuration
 db_root=../vc1/downloads
@@ -29,20 +29,8 @@ src_feat=mel
 trg_feat=mel
 dp_feat=mel
 
-# train_duration_dir=/data/group1/z44476r/Experiments/seq2seq-vc/egs/arctic/vc1/exp/clb_slt_932_tts_pt_lr8e-5/results/checkpoint-15000steps/clb_train
-# dev_duration_dir=/data/group1/z44476r/Experiments/seq2seq-vc/egs/arctic/vc1/exp/clb_slt_932_tts_pt_lr8e-5/results/checkpoint-15000steps/clb_dev
-# train_duration_dir=/data/group1/z44476r/Experiments/seq2seq-vc/egs/arctic/vc1/exp/clb_slt_932_nopt_r1/results/checkpoint-50000steps/clb_train
-# dev_duration_dir=/data/group1/z44476r/Experiments/seq2seq-vc/egs/arctic/vc1/exp/clb_slt_932_nopt_r1/results/checkpoint-50000steps/clb_dev
-# train_duration_dir=/data/group1/z44476r/Experiments/seq2seq-vc/egs/arctic/vc1/exp/clb_slt_932_tts_pt_r1/results/checkpoint-35000steps/clb_train
-# dev_duration_dir=/data/group1/z44476r/Experiments/seq2seq-vc/egs/arctic/vc1/exp/clb_slt_932_tts_pt_r1/results/checkpoint-35000steps/clb_dev
-
-# train_duration_dir=/data/group1/z44476r/Experiments/seq2seq-vc/egs/arctic/vc1/exp/clb_slt_932_tts_pt_r4/results/checkpoint-50000steps/clb_train
-# dev_duration_dir=/data/group1/z44476r/Experiments/seq2seq-vc/egs/arctic/vc1/exp/clb_slt_932_tts_pt_r4/results/checkpoint-50000steps/clb_dev
-# train_duration_dir=/data/group1/z44476r/Experiments/seq2seq-vc/egs/arctic/vc1/exp/clb_slt_80_vtn.tts_pt.n80.v1/results/checkpoint-50000steps/clb_train_80
-# dev_duration_dir=/data/group1/z44476r/Experiments/seq2seq-vc/egs/arctic/vc1/exp/clb_slt_80_vtn.tts_pt.n80.v1/results/checkpoint-50000steps/clb_dev
-
-train_duration_dir=none
-dev_duration_dir=none
+train_duration_dir=none     # need to be properly set if FS2-VC is used
+dev_duration_dir=none       # need to be properly set if FS2-VC is used
 
 # pretrained model related
 pretrained_model_checkpoint= #downloads/pretrained_models/ljspeech/transformer_tts_aept/checkpoint-50000steps.pkl
@@ -58,7 +46,7 @@ checkpoint=""               # checkpoint path to be used for decoding
                             # (e.g. <path>/<to>/checkpoint-400000steps.pkl)
 
 # evaluation related setting
-gv=False
+gv=False                    # whether to calculate GV for evaluation
                                        
 # shellcheck disable=SC1091
 . utils/parse_options.sh || exit 1;
@@ -84,6 +72,15 @@ else
     pretrained_model_dir="$(dirname ${pretrained_model_checkpoint})"
     src_stats="${pretrained_model_dir}/stats.${stats_ext}"
     trg_stats="${pretrained_model_dir}/stats.${stats_ext}"
+fi
+
+if [ ${stage} -le -1 ] && [ ${stop_stage} -ge -1 ]; then
+    echo "stage -1: Pretrained Model Download"
+
+    # download PPG model
+    utils/hf_download.py --repo_id "unilight/seq2seq-vc" --outdir "downloads" --filename "s3prl-vc-ppg_sxliu/checkpoint-50000steps.pkl"
+    utils/hf_download.py --repo_id "unilight/seq2seq-vc" --outdir "downloads" --filename "s3prl-vc-ppg_sxliu/config.yml"
+    utils/hf_download.py --repo_id "unilight/seq2seq-vc" --outdir "downloads" --filename "s3prl-vc-ppg_sxliu/stats.h5"
 fi
 
 if [ ${stage} -le 0 ] && [ ${stop_stage} -ge 0 ]; then
@@ -232,24 +229,6 @@ if [ "${stage}" -le 3 ] && [ "${stop_stage}" -ge 3 ]; then
     if [ ! -z ${pretrained_model_checkpoint} ]; then
         echo "Pretraining not Implemented yet."
         exit 1
-        # pretrained_model_checkpoint_name=$(basename ${pretrained_model_checkpoint%.*})
-        # cp "${pretrained_model_dir}/stats.${stats_ext}" "${expdir}/"
-        # cp "${pretrained_model_dir}/config.yml" "${expdir}/original_config.yml"
-        # cp "${pretrained_model_checkpoint}" "${expdir}/original_${pretrained_model_checkpoint_name}.pkl"
-        # echo "Training start. See the progress via ${expdir}/train.log."
-        # ${cuda_cmd} --gpu "${n_gpus}" "${expdir}/train.log" \
-        #     vc_train.py \
-        #         --config "${expdir}/original_config.yml" \
-        #         --additional-config "${conf}" \
-        #         --src-train-dumpdir "${dumpdir}/${srcspk}_train_${num_train}/norm_${norm_name}" \
-        #         --src-dev-dumpdir "${dumpdir}/${srcspk}_dev/norm_${norm_name}" \
-        #         --trg-train-dumpdir "${dumpdir}/${trgspk}_train_${num_train}/norm_${norm_name}" \
-        #         --trg-dev-dumpdir "${dumpdir}/${trgspk}_dev/norm_${norm_name}" \
-        #         --trg-stats "${expdir}/stats.${stats_ext}" \
-        #         --init-checkpoint "${expdir}/original_${pretrained_model_checkpoint_name}.pkl" \
-        #         --outdir "${expdir}" \
-        #         --resume "${resume}" \
-        #         --verbose "${verbose}"
     else
         cp "${dumpdir}/${trgspk}_train_${num_train}/stats.${stats_ext}" "${expdir}/"
         echo "Training start. See the progress via ${expdir}/train.log."
@@ -296,7 +275,6 @@ if [ "${stage}" -le 4 ] && [ "${stop_stage}" -ge 4 ]; then
                 --outdir "${outdir}/${name}/out.JOB" \
                 --verbose "${verbose}"
         echo "Successfully finished decoding of ${name} set."
-        # for folder in "att_ws" "outs"
     ) &
     pids+=($!) # store background pids
     done

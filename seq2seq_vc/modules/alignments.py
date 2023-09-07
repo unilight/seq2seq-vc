@@ -413,6 +413,7 @@ def viterbi_decode_v4_k(log_p_attn, text_lengths, feats_lengths, k=2):
     bin_loss = bin_loss / B
     return ds, bin_loss
 
+
 # v5 changes the direction according to the length of the input and output
 # but k is not implemented yet
 def viterbi_decode_v5(log_p_attn, text_lengths, feats_lengths, k=2):
@@ -452,6 +453,7 @@ def viterbi_decode_v5(log_p_attn, text_lengths, feats_lengths, k=2):
         bin_loss = bin_loss - cur_log_p_attn[t_idx, viterbi].mean()
     bin_loss = bin_loss / B
     return ds, bin_loss
+
 
 @jit(nopython=True)
 def _average_by_duration(ds, xs, text_lengths, feats_lengths):

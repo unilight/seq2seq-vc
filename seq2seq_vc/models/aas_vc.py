@@ -1,3 +1,9 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+# Copyright 2023 Wen-Chin Huang
+#  MIT License (https://opensource.org/licenses/MIT)
+
 import logging
 import torch
 import torch.nn.functional as F
@@ -23,11 +29,7 @@ from seq2seq_vc.modules.transformer.subsampling import Conv2dSubsampling
 from seq2seq_vc.modules.alignments import (
     AlignmentModule,
     average_by_duration,
-    viterbi_decode,
-    viterbi_decode_v2,
-    viterbi_decode_k,
-    viterbi_decode_v4_k,
-    viterbi_decode_v5,
+    viterbi_decode
 )
 from seq2seq_vc.modules.diffsinger import GaussianDiffusion, DiffNet
 from seq2seq_vc.modules.prodiff.denoiser import SpectogramDenoiser
@@ -35,7 +37,7 @@ from seq2seq_vc.modules.prodiff.denoiser import SpectogramDenoiser
 MAX_DP_OUTPUT = 10
 
 
-class MASVC(torch.nn.Module):
+class AASVC(torch.nn.Module):
     def __init__(
         self,
         idim,
@@ -67,8 +69,8 @@ class MASVC(torch.nn.Module):
         encoder_reduction_factor: int = 1,
         post_encoder_reduction_factor: int = 1,
         decoder_reduction_factor: int = 1,
-        encoder_type: str = "transformer",
-        decoder_type: str = "transformer",
+        encoder_type: str = "conformer",
+        decoder_type: str = "conformer",
         duration_predictor_type: str = "deterministic",
         # only for conformer
         conformer_pos_enc_layer_type: str = "rel_pos",
@@ -90,15 +92,8 @@ class MASVC(torch.nn.Module):
         duration_predictor_dropout_rate: float = 0.1,
         postnet_dropout_rate: float = 0.5,
         init_type: str = "xavier_uniform",
-        init_enc_alpha: float = 1.0,
-        init_dec_alpha: float = 1.0,
         use_masking: bool = False,
         use_weighted_masking: bool = False,
-        # teacher model related
-        teacher_model_decoder_reduction_factor: int = 4,
-        # viterbi
-        viterbi_version: str = "v1",
-        viterbi_k: int = 2,
         # diffsinger
         diffsinger_denoiser_residual_channels: int = 256,
         # prodiff
@@ -133,45 +128,16 @@ class MASVC(torch.nn.Module):
         self.duration_predictor_type = duration_predictor_type
         self.use_scaled_pos_enc = use_scaled_pos_enc
         self.encoder_input_layer = encoder_input_layer
-        self.teacher_model_decoder_reduction_factor = (
-            teacher_model_decoder_reduction_factor
-        )
         self.duration_predictor_use_encoder_outputs = (
             duration_predictor_use_encoder_outputs
         )
-        # self.duration_predictor_scale_ratio = duration_predictor_scale_ratio
-        if viterbi_version == "v1":
-            self.viterbi_func = viterbi_decode
-        elif viterbi_version == "v2":
-            self.viterbi_func = viterbi_decode_v2
-        elif viterbi_version == "v3":
-            self.viterbi_func = viterbi_decode_k
-        elif viterbi_version == "v4":
-            self.viterbi_func = viterbi_decode_v4_k
-        elif viterbi_version == "v5":
-            self.viterbi_func = viterbi_decode_v5
-        self.viterbi_k = viterbi_k
+        self.viterbi_func = viterbi_decode
         self.stochastic_duration_predictor_noise_scale = (
             stochastic_duration_predictor_noise_scale
         )
 
         # define encoder
-        if encoder_type == "transformer":
-            self.encoder = TransformerEncoder(
-                idim=idim,
-                attention_dim=adim,
-                attention_heads=aheads,
-                linear_units=eunits,
-                num_blocks=elayers,
-                input_layer="conv2d-scaled-pos-enc",
-                pos_enc_class=ScaledPositionalEncoding,
-                normalize_before=encoder_normalize_before,
-                concat_after=encoder_concat_after,
-                positionwise_layer_type=positionwise_layer_type,  # V
-                positionwise_conv_kernel_size=positionwise_conv_kernel_size,  # V
-                dropout_rate=transformer_enc_dropout_rate,
-            )
-        elif encoder_type == "conformer":
+        if encoder_type == "conformer":
             self.encoder = ConformerEncoder(
                 idim=idim * encoder_reduction_factor,
                 attention_dim=adim,
@@ -267,24 +233,7 @@ class MASVC(torch.nn.Module):
             else:
                 # NOTE: we use encoder as decoder
                 # because fastspeech's decoder is the same as encoder
-                if decoder_type == "transformer":
-                    self.decoder = TransformerEncoder(
-                        idim=0,
-                        attention_dim=adim * post_encoder_reduction_factor,
-                        attention_heads=aheads,
-                        linear_units=dunits,
-                        num_blocks=dlayers,
-                        input_layer=None,
-                        dropout_rate=transformer_dec_dropout_rate,
-                        positional_dropout_rate=transformer_dec_positional_dropout_rate,
-                        attention_dropout_rate=transformer_dec_attn_dropout_rate,
-                        pos_enc_class=pos_enc_class,
-                        normalize_before=decoder_normalize_before,
-                        concat_after=decoder_concat_after,
-                        positionwise_layer_type=positionwise_layer_type,
-                        positionwise_conv_kernel_size=positionwise_conv_kernel_size,
-                    )
-                elif decoder_type == "conformer":
+                if decoder_type == "conformer":
                     self.decoder = ConformerEncoder(
                         idim=0,
                         attention_dim=adim * post_encoder_reduction_factor,
@@ -305,6 +254,9 @@ class MASVC(torch.nn.Module):
                         use_cnn_module=use_cnn_in_conformer,
                         cnn_module_kernel=conformer_dec_kernel_size,
                     )
+                else:
+                    raise NotImplementedError
+
                 # define final projection
                 self.feat_out = torch.nn.Linear(
                     adim * post_encoder_reduction_factor,
@@ -326,19 +278,6 @@ class MASVC(torch.nn.Module):
                 )
             )
 
-        # initialize parameters
-        self._reset_parameters(
-            init_enc_alpha=init_enc_alpha,
-            init_dec_alpha=init_dec_alpha,
-        )
-
-    def _reset_parameters(self, init_enc_alpha: float, init_dec_alpha: float):
-        # initialize alpha in scaled positional encoding
-        if self.encoder_type == "transformer":
-            self.encoder.embed[-1].alpha.data = torch.tensor(init_enc_alpha)
-        if self.decoder_type == "transformer":
-            self.decoder.embed[-1].alpha.data = torch.tensor(init_dec_alpha)
-
     def _forward(
         self,
         xs: torch.Tensor,
@@ -349,7 +288,6 @@ class MASVC(torch.nn.Module):
         dplens: torch.Tensor = None,
         spembs: torch.Tensor = None,
         is_inference: bool = False,
-        alpha: float = 1.0,
     ):
         ret = {}
 
@@ -440,7 +378,7 @@ class MASVC(torch.nn.Module):
             else:
                 log_p_attn = self.alignment_module(hs, ys, h_masks)
                 ds, bin_loss = self.viterbi_func(
-                    log_p_attn, ilens, olens_reduced, k=self.viterbi_k
+                    log_p_attn, ilens, olens_reduced
                 )
 
             # forward duration predictor
@@ -464,7 +402,7 @@ class MASVC(torch.nn.Module):
             # forward alignment module and obtain duration
             log_p_attn = self.alignment_module(hs, ys, h_masks)
             ds, bin_loss = self.viterbi_func(
-                log_p_attn, ilens, olens_reduced, k=self.viterbi_k
+                log_p_attn, ilens, olens_reduced
             )
 
             # forward duration predictor
@@ -482,7 +420,7 @@ class MASVC(torch.nn.Module):
                 dur_nll = dur_nll / torch.sum(h_masks)
                 ret["dur_nll"] = dur_nll
 
-            # upsampling
+            # upsampling (expand)
             hs = self.length_regulator(
                 hs,
                 ds,
@@ -544,19 +482,19 @@ class MASVC(torch.nn.Module):
         dp_lengths: torch.Tensor = None,
         spembs: torch.Tensor = None,
     ):
-        """Calculate forward propagation.
+        """Forward propagation.
 
         Args:
             src_speech (Tensor): Batch of padded source features (B, Tmax, odim).
             src_speech_lengths (LongTensor): Batch of the lengths of each source (B,).
             tgt_speech (Tensor): Batch of padded target features (B, Lmax, odim).
             tgt_speech_lengths (LongTensor): Batch of the lengths of each target (B,).
+            dp_inputs (Tensor): Batch of padded duration predictor input features (B, Tmax, dpidim).
+            dp_lengths (LongTensor): Batch of the lengths of each duration prdictor input feature (B,).
             spembs (Tensor, optional): Batch of speaker embeddings (B, spk_embed_dim).
 
         Returns:
-            Tensor: Loss scalar value.
-            Dict: Statistics to be monitored.
-            Tensor: Weight value.
+            Dict: return values (see `_forward`).
 
         """
         src_speech = src_speech[:, : src_speech_lengths.max()]  # for data-parallel
@@ -568,16 +506,6 @@ class MASVC(torch.nn.Module):
         ilens, olens = src_speech_lengths, tgt_speech_lengths
 
         # forward propagation
-        # (
-        #     before_outs,
-        #     after_outs,
-        #     ds,
-        #     d_outs,
-        #     ilens_,
-        #     bin_loss,
-        #     log_p_attn,
-        #     olens_reduced,
-        # )
         ret = self._forward(
             xs,
             ilens,
@@ -600,19 +528,6 @@ class MASVC(torch.nn.Module):
         ret["olens"] = olens
         ret["ys"] = ys
 
-        # return (
-        #     before_outs,
-        #     after_outs,
-        #     ds,
-        #     d_outs,
-        #     ilens_,
-        #     olens,
-        #     ys,
-        #     bin_loss,
-        #     log_p_attn,
-        #     olens_reduced,
-        # )
-
         return ret
 
     def inference(
@@ -621,23 +536,21 @@ class MASVC(torch.nn.Module):
         tgt_speech: torch.Tensor = None,
         spembs: torch.Tensor = None,
         dp_input: torch.Tensor = None,
-        alpha: float = 1.0,
         use_teacher_forcing: bool = False,
     ):
-        """Generate the sequence of features given the sequences of characters.
+        """Forward pass during inference.
 
         Args:
             src_speech (Tensor): Source feature sequence (T, idim).
             tgt_speech (Tensor, optional): Target feature sequence (L, idim).
             spembs (Tensor, optional): Speaker embedding vector (spk_embed_dim,).
-            alpha (float, optional): Alpha to control the speed.
+            dp_inputs (Tensor): Batch of padded duration predictor input features (T, dpidim).
             use_teacher_forcing (bool, optional): Whether to use teacher forcing.
                 If true, groundtruth of duration, pitch and energy will be used.
 
         Returns:
             Tensor: Output sequence of features (L, odim).
-            None: Dummy for compatibility.
-            None: Dummy for compatibility.
+            Tensor: Output predicted durations (L, ).
 
         """
         x, y = src_speech, tgt_speech
@@ -657,7 +570,7 @@ class MASVC(torch.nn.Module):
             spembs = spemb.unsqueeze(0)
 
         if use_teacher_forcing:
-            # use groundtruth of duration, pitch, and energy
+            # use groundtruth duration
             ds = d.unsqueeze(0)
             ret = self._forward(
                 xs,
@@ -677,7 +590,6 @@ class MASVC(torch.nn.Module):
                 spembs=spembs,
                 dp_inputs=dp_input,
                 is_inference=True,
-                alpha=alpha,
             )  # (1, L, odim)
             outs = ret["after_outs"]
             ds = ret["ds"]
