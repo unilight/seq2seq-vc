@@ -17,17 +17,14 @@ trim_frame_size: 2048    # Frame size in trimming.
 trim_hop_size: 512       # Hop size in trimming.
 format: "hdf5"           # Feature file format. "npy" or "hdf5" is supported.
 
-duration_predictor_feat: "ppg_sxliu"
-teacher_duration_reduction_factor: 4
-
 feat_list:
     mel: {}
-    ppg_sxliu:
-        checkpoint: "/data/group1/z44476r/Experiments/s3prl-vc/egs/ljspeech/a2o_vc/exp/ppg_sxliu_taco2_ar/checkpoint-50000steps.pkl"
-
 src_feat: mel
-trg_feat: ppg_sxliu
-dp_feat: ppg_sxliu
+trg_feat: mel
+duration_predictor_feat: "mel"
+teacher_duration_reduction_factor: 4 # same as the encoder reduction factor in the teacher model
+                                     # this is used in the data loader to force the target to have
+                                     # the same length as the duration sum.
 
 ###########################################################
 #              NETWORK ARCHITECTURE SETTING               #
@@ -35,7 +32,7 @@ dp_feat: ppg_sxliu
 model_type: FastSpeechVC
 model_params:
     idim: 80
-    odim: 144
+    odim: 80
     adim: 384         # attention dimension
     aheads: 2         # number of attention heads
     elayers: 4        # number of encoder layers
@@ -45,7 +42,7 @@ model_params:
     positionwise_layer_type: linear   # type of position-wise layer
     positionwise_conv_kernel_size: 1  # kernel size of position wise conv layer
     duration_predictor_use_encoder_outputs: False
-    duration_predictor_input_dim: 144
+    duration_predictor_input_dim: 80             # duration predictor input dimension
     duration_predictor_layers: 2                 # number of layers of duration predictor
     duration_predictor_chans: 256                # number of channels of duration predictor
     duration_predictor_kernel_size: 3            # filter size of duration predictor
@@ -73,7 +70,7 @@ model_params:
     transformer_dec_dropout_rate: 0.2            # dropout rate for transformer decoder layer
     transformer_dec_positional_dropout_rate: 0.2 # dropout rate for transformer decoder positional encoding
     transformer_dec_attn_dropout_rate: 0.2       # dropout rate for transformer decoder attention layer
-    teacher_model_decoder_reduction_factor: 4
+    teacher_model_decoder_reduction_factor: 1
 
 ###########################################################
 #                      LOSS SETTING                       #
@@ -88,25 +85,26 @@ criterions:
 #                   INFERENCE SETTING                     #
 ###########################################################
 vocoder:
-    vocoder_type: "s3prl_vc"
-    checkpoint: "/data/group1/z44476r/Experiments/s3prl-vc/egs/arctic/a2o_vc/exp/slt_ppg_sxliu_taco2_ar/checkpoint-50000steps.pkl"
-    stats: "/data/group1/z44476r/Experiments/s3prl-vc/egs/arctic/a2o_vc/exp/slt_ppg_sxliu_taco2_ar/stats.h5"
-    config: "/data/group1/z44476r/Experiments/s3prl-vc/egs/arctic/a2o_vc/exp/slt_ppg_sxliu_taco2_ar/config.yml"
+    checkpoint: ../vc1/downloads/pwg_slt/checkpoint-400000steps.pkl
+    config: ../vc1/downloads/pwg_slt/config.yml
+    stats: ../vc1/downloads/pwg_slt/stats.h5
 
 ###########################################################
 #                  DATA LOADER SETTING                    #
 ###########################################################
-batch_size: 16             # Batch size.
-pin_memory: true            # Whether to pin memory in Pytorch DataLoader.
-num_workers: 2              # Number of workers in Pytorch DataLoader.
-allow_cache: true           # Whether to allow cache in dataset. If true, it requires cpu memory.
+batch_size: 16                  # Batch size.
+pin_memory: true                # Whether to pin memory in Pytorch DataLoader.
+num_workers: 0                  # Number of workers in Pytorch DataLoader.
+allow_cache: true               # Whether to allow cache in dataset. If true, it requires cpu memory.
+mp: false                       # Setting this to false avoids error in multi-gpu machines.
+gradient_accumulate_steps: 1    # Number of forward steps before a backward step. Used when OOM happens.
 
 ###########################################################
 #             OPTIMIZER & SCHEDULER SETTING               #
 ###########################################################
 optimizer_type: Adam
 optimizer_params:
-    lr: 0.00008              # Learning rate. See https://github.com/espnet/espnet/blob/master/espnet2/schedulers/noam_lr.py#L49-L50
+    lr: 0.00008             # Learning rate. See https://github.com/espnet/espnet/blob/master/espnet2/schedulers/noam_lr.py#L49-L50
 grad_norm: 1.0              # Gradient norm.
 scheduler: warmuplr
 scheduler_params:
@@ -115,10 +113,10 @@ scheduler_params:
 ###########################################################
 #                    INTERVAL SETTING                     #
 ###########################################################
-train_max_steps: 50000                 # Number of training steps.
+train_max_steps: 50000                  # Number of training steps.
 save_interval_steps: 5000               # Interval steps to save checkpoint.
-eval_interval_steps: 100               # Interval steps to evaluate the network.
-log_interval_steps: 10                 # Interval steps to record the training log.
+eval_interval_steps: 100                # Interval steps to evaluate the network.
+log_interval_steps: 10                  # Interval steps to record the training log.
 
 ###########################################################
 #                     OTHER SETTING                       #

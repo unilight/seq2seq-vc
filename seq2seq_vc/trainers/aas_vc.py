@@ -19,10 +19,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
-class MASVCTrainer(Trainer):
+class AASVCTrainer(Trainer):
     """Customized trainer module for
-    monotonic alignment search (MAS) based
-    non-autoregressive VC training."""
+    automatic alignment search (MAS) based
+    non-autoregressive VC training.
+    """
 
     def load_trained_modules(self, checkpoint_path, init_mods):
         if self.config["distributed"]:

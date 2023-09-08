@@ -1,12 +1,25 @@
 # Parallel one-to-one non-autoregreseive (non-AR) seq2seq VC recipe using the CMU ARCTIC dataset
 
-## AAS-VC: automatic alignment search based model
+2023.09.
 
-2023.8.14
+This recipe describes two types of non-AR seq2seq VC model described in our paper, "AAS-VC: On the Generalization Ability of Automatic Alignment Search based Non-autoregressive Sequence-to-sequence Voice Conversion".
+
+- [AAS-VC](#aas-vc)
+- [FS2-VC](#fs2-vc)
+
+### Naming convention of config files
+
+Each configuration file name contains three feature types, like `conf/aas_vc.melmelmel.v1.yaml`. They represent the feature types to the source encoder, target encoder and duration predictor, respectively. When using a different config file, please set the corresponding command line arguments `--src_feat XXX --trg_feat YYY --dp_feat ZZZ` correctly.
+
+## AAS-VC
+
+The automatic alignment search based non-AR seq2seq VC model.
 
 ### MUST READ notes before training
 
-The default config is `conf/conformer_fastspeech_flowdp_forwardsum.v1_melmelmel_durloss0_er1_per4.yaml`. What's worthwhile noting is the `per4` part. This refers to the following hyperparameter:
+#### Encoder reduction factor
+
+The default config is `conf/aas_vc.melmelmel.v1.yaml`. A hyperparameter that **MUST** be carefully set is the following:
 
 ```
 model_params:
@@ -15,7 +28,9 @@ model_params:
     ...
 ```
 
-Ignore the "post", this hyperparameter controls the "compresses rate" of the encoder output feature sequence before we send it into the attention learning module. It is ESSENTIAL to properly set this number: the automatic alignment search method requires that in EVERY parallel pair, the length of the source utterance needs to be reduced such that it is shorter than that of the target utterance. It is recommended to calculate the duration ratio of EVERY training pair prior to training, and properly set this number. (Note that if this number is set to be too large, attention learning will fail.)
+Ignore the "post", this hyperparameter controls the "compresses rate" of the encoder output feature sequence before we send it into the attention learning module. It is ESSENTIAL to properly set this number: the automatic alignment search method requires that **in EVERY parallel pair, the length of the source utterance needs to be reduced such that it is shorter than that of the target utterance**. It is recommended to calculate the duration ratio of EVERY training pair prior to training, and properly set this number. (Note that if this number is set to be too large, attention learning will fail.)
+
+#### What if OOM happens during training?
 
 If OOM happens (which is quite possible when using PPG or simply caused by a lengthy dataset), change `gradient_accumulate_steps: 1` to some number larger than 1. Note that the effective batch size will be `batch_size * gradient_accumulate_steps`.
 
@@ -53,12 +68,48 @@ Then, decoding (conversion) and evaluation can be done by executing the followin
   --tag <tag_name>
 ```
 
+### Config file for ablation studies
 
-## FS2-VC: modified FastSpeech based model
+The default config file uses the following settings:
 
-2023.7.12
+- melmelmel (see [Naming convention of config files](#naming-convention-of-config-files))
+- stochastic duration predictor
+- post encoder reduction factor = 4
+- 932 training utterances
 
-This recipe attepts to implement the paper: Non-autoregressive sequence-to-sequence voice conversion. https://arxiv.org/abs/2104.06793.
+Change the following hyperparameters to reproduce the ablation studies.
+
+- PPG as source and duration predictor input  
+  Simply use `conf/aas_vc.ppgmelppg.v1.yaml`, and set `--src_feat ppg_sxliu --trg_feat mel --dp_feat ppg_sxliu`.
+
+- Deterministic duration predictor
+  ```
+  model_params:
+      duration_predictor_type: deterministic
+  criterions:
+    "DurationPredictorLoss": {}
+  ```
+
+- pre encoder reduction factor
+
+  ```
+  model_params:
+      encoder_reduction_factor: 4
+      post_encoder_reduction_factor: 1
+  ```
+
+- smaller training set
+  Specify `num_train XXX` and start from the _Training_ section again. We used the followng batch size settings:
+  - 932, 500, 250 utterances: batch size = 16
+  - 80, 40 utterances: batch size = 8
+  - 20 utterances: batch size = 4
+
+
+## FS2-VC
+
+The modified FastSpeech based VC model
+
+This recipe attempts to implement the paper: "Non-autoregressive sequence-to-sequence voice conversion". https://arxiv.org/abs/2104.06793.
 
 ### Difference from the original paper
 
@@ -85,11 +136,7 @@ The generated durations will be in `exp/clb_slt_932_<tag>/results/checkpoint-500
 
 ### Training the non-AR model
 
-Currently, following the original paper, no pre-training is used.
-
-The file name of the config files usually has three parts, referring to the features of the source, target and duration preeictor input. For example, `conf/conformer_fastspeech.v1_melmelppg_r4teacher.yaml` means the input and output features are mel, and PPG is the input to the duration predictor.
-
-First, extract the features, calculate the statistics and normalize all the features.
+Currently, following the original paper, no pre-training is used. First, extract the features, calculate the statistics and normalize all the features.
 
 ```
 ./run.sh --stage 0 --stop_stage 2 \
@@ -110,8 +157,11 @@ Then, train the model.
   --dev_duration_dir <dev_duration_dir>
 ```
 
-Please see the `run.sh` file for examples of the `<train_duration_dir>` and `<dev_duration_dir>`.
-
+Examples for setting `<train_duration_dir>` and `<dev_duration_dir>`:
+```
+train_duration_dir=/data/group1/z44476r/Experiments/seq2seq-vc/egs/arctic/vc1/exp/clb_slt_932_tts_pt_r4/results/checkpoint-50000steps/clb_train
+dev_duration_dir=/data/group1/z44476r/Experiments/seq2seq-vc/egs/arctic/vc1/exp/clb_slt_932_tts_pt_r4/results/checkpoint-50000steps/clb_dev
+```
 Training results will be saved in `exp/<srcspk>_<trgspk>_<num_train_utterances>_<tag>`.
 
 ### Decoding and evaluation

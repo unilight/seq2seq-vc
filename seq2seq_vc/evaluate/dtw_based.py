@@ -61,12 +61,7 @@ def calculate_mcd_f0(x, y, fs, f0min, f0max, calculate_gv=False):
     y_trim, _ = librosa.effects.trim(y=y)
     ddur = float(abs(len(x_trim) - len(y_trim)) / fs)
 
-    ret = {
-        "MCD": mcd,
-        "F0RMSE": f0rmse,
-        "F0CORR": f0corr,
-        "DDUR": ddur
-    }
+    ret = {"MCD": mcd, "F0RMSE": f0rmse, "F0CORR": f0corr, "DDUR": ddur}
 
     # GV
     if calculate_gv:
@@ -75,5 +70,3 @@ def calculate_mcd_f0(x, y, fs, f0min, f0max, calculate_gv=False):
         ret["GV"] = gv
 
     return ret
-    
-    
