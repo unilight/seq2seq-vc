@@ -134,4 +134,5 @@ dump/
 data/
 dump_temp/
 data_temp/
+icassp2024_exps/
 *.done
