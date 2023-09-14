@@ -81,6 +81,11 @@ if [ ${stage} -le -1 ] && [ ${stop_stage} -ge -1 ]; then
     utils/hf_download.py --repo_id "unilight/accent-conversion-2023" --outdir "downloads" --filename "s3prl-vc-ppg_sxliu/config.yml"
     utils/hf_download.py --repo_id "unilight/accent-conversion-2023" --outdir "downloads" --filename "s3prl-vc-ppg_sxliu/stats.h5"
 
+    # download decoder model
+    utils/hf_download.py --repo_id "unilight/accent-conversion-2023" --outdir "downloads" --filename "ppg_sxliu_decoder_THXC/checkpoint-10000steps.pkl"
+    utils/hf_download.py --repo_id "unilight/accent-conversion-2023" --outdir "downloads" --filename "ppg_sxliu_decoder_THXC/config.yml"
+    utils/hf_download.py --repo_id "unilight/accent-conversion-2023" --outdir "downloads" --filename "ppg_sxliu_decoder_THXC/stats.h5"
+
     # download pretrained seq2seq model
     utils/hf_download.py --repo_id "unilight/accent-conversion-2023" --outdir "downloads" --filename "ljspeech_text_to_ppg_sxliu_aept/checkpoint-50000steps.pkl"
     utils/hf_download.py --repo_id "unilight/accent-conversion-2023" --outdir "downloads" --filename "ljspeech_text_to_ppg_sxliu_aept/config.yml"

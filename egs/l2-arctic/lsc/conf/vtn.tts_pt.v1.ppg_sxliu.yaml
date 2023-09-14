@@ -10,9 +10,9 @@ freeze-mods: null
 ###########################################################
 vocoder:
     vocoder_type: "s3prl_vc"
-    checkpoint: "/data/group1/z44476r/Experiments/s3prl-vc/egs/l2-arctic/a2o_vc/exp/TXHC_ppg_sxliu_taco2_ar/checkpoint-10000steps.pkl"
-    stats: "/data/group1/z44476r/Experiments/s3prl-vc/egs/l2-arctic/a2o_vc/exp/TXHC_ppg_sxliu_taco2_ar/stats.h5"
-    config: "/data/group1/z44476r/Experiments/s3prl-vc/egs/l2-arctic/a2o_vc/exp/TXHC_ppg_sxliu_taco2_ar/config.yml"
+    checkpoint: "./downloads/ppg_sxliu_decoder_THXC/checkpoint-10000steps.pkl"
+    stats: "./downloads/ppg_sxliu_decoder_THXC/stats.h5"
+    config: "./downloads/ppg_sxliu_decoder_THXC/config.yml"
 inference:
     threshold: 0.5    # threshold to stop the generation
     maxlenratio: 6.0 # maximum length of generated samples = input length * maxlenratio
