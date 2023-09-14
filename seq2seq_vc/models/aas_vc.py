@@ -31,8 +31,6 @@ from seq2seq_vc.modules.alignments import (
     average_by_duration,
     viterbi_decode
 )
-from seq2seq_vc.modules.diffsinger import GaussianDiffusion, DiffNet
-from seq2seq_vc.modules.prodiff.denoiser import SpectogramDenoiser
 
 MAX_DP_OUTPUT = 10
 
