@@ -1,5 +1,6 @@
 # seq2seq-vc: sequence-to-sequence voice conversion toolkit
 
+_**(NEW)**_ Paper (Submitted to ICASSP 2024) [![arXiv](https://img.shields.io/badge/arXiv-2309.07598-b31b1b.svg)](https://arxiv.org/abs/2309.07598)  
 _**(NEW)**_ Paper (APSIPA ASC 2023) [![arXiv](https://img.shields.io/badge/arXiv-2309.02133-b31b1b.svg)](https://arxiv.org/abs/2309.02133)  
 Paper (INTERSPEECH 2020) [![arXiv](https://img.shields.io/badge/arXiv-1912.06813-b31b1b.svg)](https://arxiv.org/abs/1912.06813)  
 Paper (IEEE/ACM TASLP)  [![arXiv](https://img.shields.io/badge/arXiv-2008.03088-b31b1b.svg)](https://arxiv.org/abs/2008.03088)  
@@ -13,6 +14,9 @@ Original codebase on ESPNet [![GitHub](https://img.shields.io/badge/github-%2312
 ## Introduction and motivation
 
 Sequence-to-sequence (seq2seq) modeling is especially attractive to voice conversion (VC) owing to their ability to convert prosody. In particular, this repository aim to reproduce the results of the following papers/models.
+
+### Automatic alignment search (AAS) based non-autoregressive seq2seq VC ([paper](https://arxiv.org/abs/2309.07598))
+A non-autoregressive seq2seq VC method that can be directly trained on a parallel dataset without any pre-trained models.
 
 ### Ground-Truth-Free Foreign Accent Conversion (FAC) ([paper](https://arxiv.org/abs/2309.02133))
 We compared three methods for ground-truth-free FAC. All methods utilize seq2seq modeling and non-parallel frame-based VC models. We provide pre-trained vocoder and non-parallel frame-based VC models.
@@ -36,6 +40,9 @@ make
 ## Complete training, decoding and benchmarking
 
 Same as many speech processing based repositories ([ESPNet](https://github.com/espnet/espnet), [ParallelWaveGAN](https://github.com/kan-bayashi/ParallelWaveGAN), etc.), we formulate our recipes in kaldi-style. They can be found in the `egs` folder. Please check the detailed usage in each recipe.
+
+### Reproducing AAS-VC experiments
+The experiments in the AAS-VC paper are conducted using the CMU ARCTIC dataset. Please refer to the readme file in `egs/arctic/vc2`.
 
 ### Reproducing FAC experiments
 

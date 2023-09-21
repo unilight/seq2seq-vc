@@ -17,6 +17,7 @@ However, before training, a non-parallel frame-based model is used to extract th
     - A pre-trained vocoder is downloaded (to `downloads/pwg_TXHC`). We use a Parallel WaveGAN vocoder.
     - The non-parallel frame-based models is downloaded (to `downloads/s3prl-vc-ppg_sxliu` (for latent feature extraction) and `downloads/ppg_sxliu_decoder_THXC` (for latent feature to mel transformation)).
     - **The pre-trained seq2seq VC model is downloaded (to `downloads/ljspeech_text_to_ppg_sxliu_aept`). Note that this pre-trained model is latent-to-latent, not mel-to-mel.**
+    - The already trained LSC model (to `exp/TXHC_bdl_1032_pretrained`).
 - Stage 0: Data preparation. File lists are generated in `data/<spk>_<set>_<num_train_utterances>` by default. Each file contains space-separated lines with the format `<id> <wave file path>`. These files are used for training and decoding (conversion).
 - Stage 1: **Latent feature extraction**. The non-parallel frame-based model is used to extract the latent features from the source and target training sets for the seq2seq model training. The extracted features are saved in `dump/<spk>_<set>_<num_train_utterances>/<npvc_name>/raw`.
 - Stage 2: Statistics calculation and normalization. The normalized latent features are saved in `dump/<spk>_<set>_<num_train_utterances>/<npvc_name>/norm_<norm_name>`.
@@ -50,3 +51,12 @@ Modifiable arguments:
 - Stage 4: decoding (conversion). In this stage, the converted waveforms are saved in `exp/<srcspk>_<trgspk>_<num_train_utterances>_<tag>/results/checkpoint-XXsteps/<srcspk>_<set>/out.X`.
 - Stage 5: objective evaluation. Results are saved in `exp/<srcspk>_<trgspk>_<num_train_utterances>_<tag>/results/checkpoint-XXsteps/<srcspk>_<set>/evaluation.log` In total we calculated the following metrics:
   - `CER` and `WER`: character/word error rates from a pre-trained ASR model.
+
+
+## Decoding with already trained model
+
+To quickly reproduce the results in the paper, a already trained model is automatically downloaded in stage -1. To decode, simply use the correct tag:
+
+```
+./run.sh --stage 4 --stop_stage 5 --tag pretrained
+```
