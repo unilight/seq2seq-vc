@@ -8,6 +8,7 @@ Original codebase on ESPNet [![GitHub](https://img.shields.io/badge/github-%2312
 
 ## News
 
+- **2023.10**: We released a recipe for running AAS-VC on [Hi-Fi-CAPTAIN](https://ast-astrec.nict.go.jp/en/release/hi-fi-captain/)! Please refer to `egs/hificaptain_jp/vc2` for details.
 - **2023.09**: We released a recipe for non-autoregressive seq2seq VC! Please refer to `egs/arctic/vc2` for details.
 - **2023.09**: We released a recipe for foreign accent conversion (FAC)! Please refer to `egs/l2-arctic` for details.
 

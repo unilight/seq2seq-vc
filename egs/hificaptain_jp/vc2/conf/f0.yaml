@@ -1,0 +1,6 @@
+male:
+  f0min: 40
+  f0max: 290
+female:
+  f0min: 90
+  f0max: 440
