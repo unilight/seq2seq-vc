@@ -1,0 +1,12 @@
+bdl:
+  f0min: 70
+  f0max: 210
+clb:
+  f0min: 110
+  f0max: 270
+rms:
+  f0min: 55
+  f0max: 200
+slt:
+  f0min: 120
+  f0max: 275
