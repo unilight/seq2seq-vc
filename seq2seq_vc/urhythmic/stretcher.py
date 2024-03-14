@@ -49,6 +49,7 @@ class TimeStretcherFineGrained:
         units = [
             F.interpolate(segment, mode="linear", size=duration)
             for segment, duration in zip(units, tgt_duartations)
+            if duration > 0 # discard units with duration 0
         ]
         units = torch.cat(units, dim=-1)
         return units
