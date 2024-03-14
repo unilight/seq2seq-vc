@@ -16,22 +16,15 @@ verbose=1      # verbosity level (lower is less info)
 n_gpus=1       # number of gpus in training
 n_jobs=16      # number of parallel jobs in feature extraction
 
-conf=conf/vtn.v1.yaml
+conf=conf/vtn.v1.yaml       # this is only used for data io
 
 # dataset configuration
 db_root=../vc1/downloads    # change this to `downloads` if you did not run vc1
 dumpdir=dump                # directory to dump full features
-srcspk=clb
+srcspk=clb                  # available speakers: "clb" "bdl"
 trgspk=slt                  # available speakers: "slt" "rms"
 num_train=932
-norm_name=                  # used to specify normalized data.
-                            # Ex: `judy` for normalization with pretrained model, `self` for self-normalization
 
-# training related setting
-tag=""     # tag for directory to save model
-resume=""  # checkpoint path to resume training
-           # (e.g. <path>/<to>/checkpoint-10000steps.pkl)
-           
 # evaluation related setting
 gv=False
                                        
@@ -40,19 +33,11 @@ gv=False
 
 set -euo pipefail
 
-# if [ ${stage} -le -1 ] && [ ${stop_stage} -ge -1 ]; then
-#     echo "stage -1: Data and Pretrained Model Download"
-#     local/data_download.sh ${db_root} ${srcspk}
-#     local/data_download.sh ${db_root} ${trgspk}
-
-#     # download pretrained model for training
-#     utils/hf_download.py --repo_id "unilight/seq2seq-vc" --outdir "downloads/pretrained_models" --filename "ljspeech/transformer_tts_aept/checkpoint-50000steps.pkl"
-#     utils/hf_download.py --repo_id "unilight/seq2seq-vc" --outdir "downloads/pretrained_models" --filename "ljspeech/transformer_tts_aept/config.yml"
-#     utils/hf_download.py --repo_id "unilight/seq2seq-vc" --outdir "downloads/pretrained_models" --filename "ljspeech/transformer_tts_aept/stats.h5"
-
-#     # download pretrained vocoder
-#     local/pretrained_model_download.sh ${db_root} pwg_${trgspk}
-# fi
+if [ ${stage} -le -1 ] && [ ${stop_stage} -ge -1 ]; then
+    echo "stage -1: Data and Pretrained Model Download"
+    local/data_download.sh ${db_root} ${srcspk}
+    local/data_download.sh ${db_root} ${trgspk}
+fi
 
 if [ ${stage} -le 0 ] && [ ${stop_stage} -ge 0 ]; then
     echo "stage 0: Data preparation"
