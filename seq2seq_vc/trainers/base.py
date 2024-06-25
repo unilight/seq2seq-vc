@@ -212,6 +212,9 @@ class Trainer(object):
                     f"(Steps: {self.steps}) {key} = {self.total_train_loss[key]:.4f}."
                 )
             self._write_to_tensorboard(self.total_train_loss)
+            peak_memory = torch.cuda.max_memory_allocated()/(2**30)
+            logging.info(f"Peak Memory: {peak_memory:.4f} GB")
+            torch.cuda.reset_peak_memory_stats()
 
             # reset
             self.total_train_loss = defaultdict(float)
