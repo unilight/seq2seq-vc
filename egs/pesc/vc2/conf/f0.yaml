@@ -1,0 +1,42 @@
+SP_PS_FEMALE001:
+  f0min: 140
+  f0max: 290
+SP_PS_MALE001:
+  f0min: 90
+  f0max: 290
+SP_PS_MALE002:
+  f0min: 90
+  f0max: 290
+SP_PS_MALE003:
+  f0min: 90
+  f0max: 290
+SP_PS_MALE004:
+  f0min: 90
+  f0max: 240
+SP_PS_MALE005:
+  f0min: 40
+  f0max: 240
+SP_PS_MALE006:
+  f0min: 40
+  f0max: 290
+SP_PS_MALE007:
+  f0min: 40
+  f0max: 220
+SP_PS_MALE008:
+  f0min: 90
+  f0max: 240
+SP_PS_MALE009:
+  f0min: 90
+  f0max: 240
+SP_PS_MALE010:
+  f0min: 90
+  f0max: 240
+SP_PS_MALE011:
+  f0min: 70
+  f0max: 190
+SP_PS_MALE012:
+  f0min: 90
+  f0max: 240
+SP_PS_MALE013:
+  f0min: 40
+  f0max: 190
