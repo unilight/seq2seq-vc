@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Copyright 2024 Wen-Chin Huang (Nagoya University)
+# Copyright 2023 Wen-Chin Huang (Nagoya University)
 #  MIT License (https://opensource.org/licenses/MIT)
 
 . ./path.sh || exit 1;
@@ -11,16 +11,15 @@ stage=-1       # stage to start
 stop_stage=100 # stage to stop
 verbose=1      # verbosity level (lower is less info)
 n_gpus=1       # number of gpus in training
-n_jobs=8      # number of parallel jobs in feature extraction
+n_jobs=10      # number of parallel jobs in feature extraction
 
 conf=conf/aas_vc.melmelmel.v1.yaml
 
 # dataset configuration
-#db_root=downloads
-db_root=/data/group1/z44476r/Corpora/pseudo-el/ELCorpus
+db_root=downloads
 dumpdir=dump                # directory to dump full features
-srcspk=EL_PS_FEMALE001
-trgspk=SP_PS_FEMALE001
+srcspk=20230426_TashimaCoesteEL                  # available speakers: "clb" "bdl"
+trgspk=20230426_TashimaCoesteSP                  # available speakers: "slt" "rms"
 stats_ext=h5
 norm_name=self                  # used to specify normalized data.
                             # Ex: `judy` for normalization with pretrained model, `self` for self-normalization
@@ -33,7 +32,7 @@ train_duration_dir=none     # need to be properly set if FS2-VC is used
 dev_duration_dir=none       # need to be properly set if FS2-VC is used
 
 # pretrained model related
-pretrained_model_checkpoint=
+pretrained_model_checkpoint= #downloads/pretrained_models/ljspeech/transformer_tts_aept/checkpoint-50000steps.pkl
 
 # training related setting
 tag=""     # tag for directory to save model
@@ -54,46 +53,43 @@ gv=False                    # whether to calculate GV for evaluation
 set -euo pipefail
 
 # sanity check for norm_name and pretrained_model_checkpoint
-src_stats="${dumpdir}/${srcspk}_train/stats.${stats_ext}"
-trg_stats="${dumpdir}/${trgspk}_train/stats.${stats_ext}"
-
-if [ ${stage} -le -1 ] && [ ${stop_stage} -ge -1 ]; then
-    echo "stage -1: Dataset and Pretrained Model Download"
-
-    # download dataset
-    local/data_download.sh "${db_root}"
-
-    # download ParallelWaveGAN model
-    mkdir -p downloads/pwg
-    utils/hf_download.py --repo_id "unilight/pesc-pwg" --outdir "downloads/pwg" --filename "checkpoint-400000steps.pkl"
-    utils/hf_download.py --repo_id "unilight/pesc-pwg" --outdir "downloads/pwg" --filename "config.yml"
-    utils/hf_download.py --repo_id "unilight/pesc-pwg" --outdir "downloads/pwg" --filename "stats.h5"
+if [ -z ${norm_name} ]; then
+    echo "Please specify --norm_name ."
+    exit 1
+elif [ ${norm_name} == "self" ]; then
+    if [ ! -z ${pretrained_model_checkpoint} ]; then
+        echo "You cannot specify pretrained_model_checkpoint and norm_name=self simultaneously."
+        exit 1
+    fi
+    src_stats="${dumpdir}/${srcspk}_train/stats.${stats_ext}"
+    trg_stats="${dumpdir}/${trgspk}_train/stats.${stats_ext}"
+else
+    if [ -z ${pretrained_model_checkpoint} ]; then
+        echo "Please specify the pretrained model checkpoint."
+        exit 1
+    fi
+    pretrained_model_dir="$(dirname ${pretrained_model_checkpoint})"
+    src_stats="${pretrained_model_dir}/stats.${stats_ext}"
+    trg_stats="${pretrained_model_dir}/stats.${stats_ext}"
 fi
 
 if [ ${stage} -le 0 ] && [ ${stop_stage} -ge 0 ]; then
     echo "stage 0: Data preparation"
-
-    # srcspk
-    local/data_prep.sh \
-        --train_set "${srcspk}_train" \
-        --dev_set "${srcspk}_dev" \
-        --eval_set "${srcspk}_eval" \
-        "${db_root}/data/EL/${srcspk}" "${srcspk}" data
-    ${train_cmd} "data/${srcspk}_train/create_histogram.log" \
-        create_histogram.py \
-            --scp "data/${srcspk}_train/wav.scp" \
-            --figure_dir "data/${srcspk}_train"
-    
-    # trgspk
-    local/data_prep.sh \
-        --train_set "${trgspk}_train" \
-        --dev_set "${trgspk}_dev" \
-        --eval_set "${trgspk}_eval" \
-        "${db_root}/data/SP/${trgspk}" "${trgspk}" data
-    ${train_cmd} "data/${trgspk}_train/create_histogram.log" \
-        create_histogram.py \
-            --scp "data/${trgspk}_train/wav.scp" \
-            --figure_dir "data/${trgspk}_train"
+    for spk in ${srcspk} ${trgspk}; do
+        local/data_prep.sh \
+            --train_set "${spk}_train" \
+            --dev_set "${spk}_dev" \
+            --eval_set "${spk}_eval" \
+            "${db_root}/${spk}" "${spk}" data
+        ${train_cmd} "data/${spk}_train/create_histogram.log" \
+            create_histogram.py \
+                --scp "data/${spk}_train/wav.scp" \
+                --figure_dir "data/${spk}_train"
+        ${train_cmd} "data/${spk}_train/calculate_duraiton_statistics.log" \
+            compute_duration_statistics.py \
+                --scp "data/${spk}_train/wav.scp" \
+                --figure_dir "data/${spk}_train"
+    done
 fi
 
 if [ "${stage}" -le 1 ] && [ "${stop_stage}" -ge 1 ]; then
@@ -294,10 +290,10 @@ if [ ${stage} -le 5 ] && [ ${stop_stage} -ge 5 ]; then
         ${cuda_cmd} --gpu "${n_gpus}" "${outdir}/${name}/evaluation.log" \
             local/evaluate.py \
                 --wavdir "${outdir}/${name}" \
-                --data_root "${db_root}/data/SP/${trgspk}" \
+                --data_root "${db_root}/${trgspk}" \
                 --trgspk ${trgspk} \
                 --f0_path "conf/f0.yaml" \
-                --text_path "${db_root}/text.csv"
+                --transcription_path "${db_root}/text"
         grep "Mean MCD" "${outdir}/${name}/evaluation.log"
     done
 fi

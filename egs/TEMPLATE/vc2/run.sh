@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Copyright 2024 Wen-Chin Huang (Nagoya University)
+# Copyright 2023 Wen-Chin Huang (Nagoya University)
 #  MIT License (https://opensource.org/licenses/MIT)
 
 . ./path.sh || exit 1;
@@ -11,18 +11,18 @@ stage=-1       # stage to start
 stop_stage=100 # stage to stop
 verbose=1      # verbosity level (lower is less info)
 n_gpus=1       # number of gpus in training
-n_jobs=8      # number of parallel jobs in feature extraction
+n_jobs=16      # number of parallel jobs in feature extraction
 
 conf=conf/aas_vc.melmelmel.v1.yaml
 
 # dataset configuration
-#db_root=downloads
-db_root=/data/group1/z44476r/Corpora/pseudo-el/ELCorpus
+db_root=../vc1/downloads
 dumpdir=dump                # directory to dump full features
-srcspk=EL_PS_FEMALE001
-trgspk=SP_PS_FEMALE001
+srcspk=clb                  # available speakers: "clb" "bdl"
+trgspk=slt                  # available speakers: "slt" "rms"
+num_train=932
 stats_ext=h5
-norm_name=self                  # used to specify normalized data.
+norm_name=                  # used to specify normalized data.
                             # Ex: `judy` for normalization with pretrained model, `self` for self-normalization
 
 src_feat=mel
@@ -33,7 +33,7 @@ train_duration_dir=none     # need to be properly set if FS2-VC is used
 dev_duration_dir=none       # need to be properly set if FS2-VC is used
 
 # pretrained model related
-pretrained_model_checkpoint=
+pretrained_model_checkpoint= #downloads/pretrained_models/ljspeech/transformer_tts_aept/checkpoint-50000steps.pkl
 
 # training related setting
 tag=""     # tag for directory to save model
@@ -54,46 +54,49 @@ gv=False                    # whether to calculate GV for evaluation
 set -euo pipefail
 
 # sanity check for norm_name and pretrained_model_checkpoint
-src_stats="${dumpdir}/${srcspk}_train/stats.${stats_ext}"
-trg_stats="${dumpdir}/${trgspk}_train/stats.${stats_ext}"
+if [ -z ${norm_name} ]; then
+    echo "Please specify --norm_name ."
+    exit 1
+elif [ ${norm_name} == "self" ]; then
+    if [ ! -z ${pretrained_model_checkpoint} ]; then
+        echo "You cannot specify pretrained_model_checkpoint and norm_name=self simultaneously."
+        exit 1
+    fi
+    src_stats="${dumpdir}/${srcspk}_train_${num_train}/stats.${stats_ext}"
+    trg_stats="${dumpdir}/${trgspk}_train_${num_train}/stats.${stats_ext}"
+else
+    if [ -z ${pretrained_model_checkpoint} ]; then
+        echo "Please specify the pretrained model checkpoint."
+        exit 1
+    fi
+    pretrained_model_dir="$(dirname ${pretrained_model_checkpoint})"
+    src_stats="${pretrained_model_dir}/stats.${stats_ext}"
+    trg_stats="${pretrained_model_dir}/stats.${stats_ext}"
+fi
 
 if [ ${stage} -le -1 ] && [ ${stop_stage} -ge -1 ]; then
-    echo "stage -1: Dataset and Pretrained Model Download"
+    echo "stage -1: Pretrained Model Download"
 
-    # download dataset
-    local/data_download.sh "${db_root}"
-
-    # download ParallelWaveGAN model
-    mkdir -p downloads/pwg
-    utils/hf_download.py --repo_id "unilight/pesc-pwg" --outdir "downloads/pwg" --filename "checkpoint-400000steps.pkl"
-    utils/hf_download.py --repo_id "unilight/pesc-pwg" --outdir "downloads/pwg" --filename "config.yml"
-    utils/hf_download.py --repo_id "unilight/pesc-pwg" --outdir "downloads/pwg" --filename "stats.h5"
+    # download PPG model
+    utils/hf_download.py --repo_id "unilight/seq2seq-vc" --outdir "downloads" --filename "s3prl-vc-ppg_sxliu/checkpoint-50000steps.pkl"
+    utils/hf_download.py --repo_id "unilight/seq2seq-vc" --outdir "downloads" --filename "s3prl-vc-ppg_sxliu/config.yml"
+    utils/hf_download.py --repo_id "unilight/seq2seq-vc" --outdir "downloads" --filename "s3prl-vc-ppg_sxliu/stats.h5"
 fi
 
 if [ ${stage} -le 0 ] && [ ${stop_stage} -ge 0 ]; then
     echo "stage 0: Data preparation"
-
-    # srcspk
-    local/data_prep.sh \
-        --train_set "${srcspk}_train" \
-        --dev_set "${srcspk}_dev" \
-        --eval_set "${srcspk}_eval" \
-        "${db_root}/data/EL/${srcspk}" "${srcspk}" data
-    ${train_cmd} "data/${srcspk}_train/create_histogram.log" \
-        create_histogram.py \
-            --scp "data/${srcspk}_train/wav.scp" \
-            --figure_dir "data/${srcspk}_train"
-    
-    # trgspk
-    local/data_prep.sh \
-        --train_set "${trgspk}_train" \
-        --dev_set "${trgspk}_dev" \
-        --eval_set "${trgspk}_eval" \
-        "${db_root}/data/SP/${trgspk}" "${trgspk}" data
-    ${train_cmd} "data/${trgspk}_train/create_histogram.log" \
-        create_histogram.py \
-            --scp "data/${trgspk}_train/wav.scp" \
-            --figure_dir "data/${trgspk}_train"
+    for spk in ${srcspk} ${trgspk}; do
+        local/data_prep.sh \
+            --train_set "${spk}_train_${num_train}" \
+            --dev_set "${spk}_dev" \
+            --eval_set "${spk}_eval" \
+            --num_train ${num_train} \
+            "${db_root}/cmu_us_${spk}_arctic" "${spk}" data
+        ${train_cmd} "data/${spk}_train_${num_train}/create_histogram.log" \
+            create_histogram.py \
+                --scp "data/${spk}_train_${num_train}/wav.scp" \
+                --figure_dir "data/${spk}_train_${num_train}"
+    done
 fi
 
 if [ "${stage}" -le 1 ] && [ "${stop_stage}" -ge 1 ]; then
@@ -108,7 +111,7 @@ if [ "${stage}" -le 1 ] && [ "${stop_stage}" -ge 1 ]; then
 
     # extract raw features
     pids=()
-    for name in "${srcspk}_train" "${srcspk}_dev" "${srcspk}_eval" "${trgspk}_train" "${trgspk}_dev" "${trgspk}_eval"; do
+    for name in "${srcspk}_train_${num_train}" "${srcspk}_dev" "${srcspk}_eval" "${trgspk}_train_${num_train}" "${trgspk}_dev" "${trgspk}_eval"; do
     (
         [ ! -e "${dumpdir}/${name}/raw" ] && mkdir -p "${dumpdir}/${name}/raw"
         echo "Feature extraction start. See the progress via ${dumpdir}/${name}/raw/preprocessing.*.log."
@@ -117,6 +120,7 @@ if [ "${stage}" -le 1 ] && [ "${stop_stage}" -ge 1 ]; then
             preprocess.py \
                 --config "${config_for_feature_extraction}" \
                 --scp "${dumpdir}/${name}/raw/wav.JOB.scp" \
+                --segments "${dumpdir}/${name}/raw/segments.JOB" \
                 --dumpdir "${dumpdir}/${name}/raw/dump.JOB" \
                 --verbose "${verbose}"
         echo "Successfully finished feature extraction of ${name} set."
@@ -135,7 +139,7 @@ if [ "${stage}" -le 2 ] && [ "${stop_stage}" -ge 2 ]; then
         # calculate statistics for normalization
 
         # src
-        name="${srcspk}_train"
+        name="${srcspk}_train_${num_train}"
         echo "Statistics computation start. See the progress via ${dumpdir}/${name}/compute_statistics_${src_feat}.log."
         ${train_cmd} "${dumpdir}/${name}/compute_statistics_${src_feat}.log" \
             compute_statistics.py \
@@ -146,7 +150,7 @@ if [ "${stage}" -le 2 ] && [ "${stop_stage}" -ge 2 ]; then
                 --verbose "${verbose}"
 
         # trg
-        name="${trgspk}_train"
+        name="${trgspk}_train_${num_train}"
         echo "Statistics computation start. See the progress via ${dumpdir}/${name}/compute_statistics_${trg_feat}.log."
         ${train_cmd} "${dumpdir}/${name}/compute_statistics_${trg_feat}.log" \
             compute_statistics.py \
@@ -167,7 +171,7 @@ if [ "${stage}" -le 2 ] && [ "${stop_stage}" -ge 2 ]; then
     # normalize and dump them
     # src
     spk="${srcspk}"
-    for name in "${spk}_train" "${spk}_dev" "${spk}_eval"; do
+    for name in "${spk}_train_${num_train}" "${spk}_dev" "${spk}_eval"; do
     (
         [ ! -e "${dumpdir}/${name}/norm_${norm_name}" ] && mkdir -p "${dumpdir}/${name}/norm_${norm_name}"
         echo "Nomalization start. See the progress via ${dumpdir}/${name}/norm_${norm_name}/normalize_${src_feat}.*.log."
@@ -190,7 +194,7 @@ if [ "${stage}" -le 2 ] && [ "${stop_stage}" -ge 2 ]; then
 
     # trg
     spk="${trgspk}"
-    for name in "${spk}_train" "${spk}_dev" "${spk}_eval"; do
+    for name in "${spk}_train_${num_train}" "${spk}_dev" "${spk}_eval"; do
     (
         [ ! -e "${dumpdir}/${name}/norm_${norm_name}" ] && mkdir -p "${dumpdir}/${name}/norm_${norm_name}"
         echo "Nomalization start. See the progress via ${dumpdir}/${name}/norm_${norm_name}/normalize_${trg_feat}.*.log."
@@ -213,9 +217,9 @@ if [ "${stage}" -le 2 ] && [ "${stop_stage}" -ge 2 ]; then
 fi
 
 if [ -z ${tag} ]; then
-    expname=${srcspk}_${trgspk}_$(basename ${conf%.*})
+    expname=${srcspk}_${trgspk}_${num_train}_$(basename ${conf%.*})
 else
-    expname=${srcspk}_${trgspk}_${tag}
+    expname=${srcspk}_${trgspk}_${num_train}_${tag}
 fi
 expdir=exp/${expname}
 if [ "${stage}" -le 3 ] && [ "${stop_stage}" -ge 3 ]; then
@@ -230,19 +234,19 @@ if [ "${stage}" -le 3 ] && [ "${stop_stage}" -ge 3 ]; then
         echo "Pretraining not Implemented yet."
         exit 1
     else
-        cp "${dumpdir}/${trgspk}_train/stats.${stats_ext}" "${expdir}/"
+        cp "${dumpdir}/${trgspk}_train_${num_train}/stats.${stats_ext}" "${expdir}/"
         echo "Training start. See the progress via ${expdir}/train.log."
         ${cuda_cmd} --gpu "${n_gpus}" "${expdir}/train.log" \
             vc_train.py \
                 --config "${conf}" \
-                --src-train-dumpdir "${dumpdir}/${srcspk}_train/norm_${norm_name}" \
+                --src-train-dumpdir "${dumpdir}/${srcspk}_train_${num_train}/norm_${norm_name}" \
                 --src-dev-dumpdir "${dumpdir}/${srcspk}_dev/norm_${norm_name}" \
                 --src-feat-type "${src_feat}" \
-                --trg-train-dumpdir "${dumpdir}/${trgspk}_train/norm_${norm_name}" \
+                --trg-train-dumpdir "${dumpdir}/${trgspk}_train_${num_train}/norm_${norm_name}" \
                 --trg-dev-dumpdir "${dumpdir}/${trgspk}_dev/norm_${norm_name}" \
                 --trg-feat-type "${trg_feat}" \
                 --trg-stats "${expdir}/stats.${stats_ext}" \
-                --train-dp-input-dir "${dumpdir}/${srcspk}_train/norm_${norm_name}" \
+                --train-dp-input-dir "${dumpdir}/${srcspk}_train_${num_train}/norm_${norm_name}" \
                 --dev-dp-input-dir "${dumpdir}/${srcspk}_dev/norm_${norm_name}" \
                 --train-duration-dir "${train_duration_dir}" \
                 --dev-duration-dir "${dev_duration_dir}" \
@@ -294,10 +298,66 @@ if [ ${stage} -le 5 ] && [ ${stop_stage} -ge 5 ]; then
         ${cuda_cmd} --gpu "${n_gpus}" "${outdir}/${name}/evaluation.log" \
             local/evaluate.py \
                 --wavdir "${outdir}/${name}" \
-                --data_root "${db_root}/data/SP/${trgspk}" \
+                --data_root "${db_root}/cmu_us_${trgspk}_arctic" \
                 --trgspk ${trgspk} \
                 --f0_path "conf/f0.yaml" \
-                --text_path "${db_root}/text.csv"
+                --segments "data/${trgspk}_${_set}/segments" \
+                --gv ${gv}
+        grep "Mean MCD" "${outdir}/${name}/evaluation.log"
+    done
+fi
+
+if [ "${stage}" -le 10 ] && [ "${stop_stage}" -ge 10 ]; then
+    echo "Stage 10: Generalization ability test"
+    # shellcheck disable=SC2012
+    [ -z "${checkpoint}" ] && checkpoint="$(ls -dt "${expdir}"/*.pkl | head -1 || true)"
+    outdir="${expdir}/results/$(basename "${checkpoint}" .pkl)"
+    pids=()
+    for _set in "dev" "eval"; do
+    (
+        if [ ${srcspk} == "clb" ]; then
+            name="bdl_${_set}"
+        elif [ ${srcspk} == "bdl" ]; then
+            name="clb_${_set}"
+        fi   
+        [ ! -e "${outdir}/${name}" ] && mkdir -p "${outdir}/${name}"
+        [ "${n_gpus}" -gt 1 ] && n_gpus=1
+        echo "Decoding start. See the progress via ${outdir}/${name}/decode.*.log."
+        CUDA_VISIBLE_DEVICES="" ${cuda_cmd} JOB=1:${n_jobs} --gpu 0 "${outdir}/${name}/decode.JOB.log" \
+            vc_decode.py \
+                --dumpdir "${dumpdir}/${name}/norm_${norm_name}/dump.JOB" \
+                --dp_input_dumpdir "${dumpdir}/${name}/norm_${norm_name}/dump.JOB" \
+                --checkpoint "${checkpoint}" \
+                --src-feat-type "${src_feat}" \
+                --trg-feat-type "${trg_feat}" \
+                --trg-stats "${expdir}/stats.${stats_ext}" \
+                --outdir "${outdir}/${name}/out.JOB" \
+                --verbose "${verbose}"
+        echo "Successfully finished decoding of ${name} set."
+    ) &
+    pids+=($!) # store background pids
+    done
+    i=0; for pid in "${pids[@]}"; do wait ${pid} || ((i++)); done
+    [ ${i} -gt 0 ] && echo "$0: ${i} background jobs are failed." && false
+    echo "Successfully finished decoding."
+
+    echo "Objective Evaluation"
+    [ -z "${checkpoint}" ] && checkpoint="$(ls -dt "${expdir}"/*.pkl | head -1 || true)"
+    outdir="${expdir}/results/$(basename "${checkpoint}" .pkl)"
+    for _set in "dev" "eval"; do
+        if [ ${srcspk} == "clb" ]; then
+            name="bdl_${_set}"
+        elif [ ${srcspk} == "bdl" ]; then
+            name="clb_${_set}"
+        fi   
+        echo "Evaluation start. See the progress via ${outdir}/${name}/evaluation.log."
+        ${cuda_cmd} --gpu "${n_gpus}" "${outdir}/${name}/evaluation.log" \
+            local/evaluate.py \
+                --wavdir "${outdir}/${name}" \
+                --data_root "${db_root}/cmu_us_${trgspk}_arctic" \
+                --trgspk ${trgspk} \
+                --f0_path "conf/f0.yaml" \
+                --segments "data/${trgspk}_${_set}/segments"
         grep "Mean MCD" "${outdir}/${name}/evaluation.log"
     done
 fi
